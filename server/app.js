@@ -3,6 +3,7 @@ import express from 'express';
 import { z } from 'zod';
 import { acknowledgment, buildingId, command, decision, deviceId, id, snapshot } from './contracts.js';
 import { demoOwner } from './demo.js';
+import { addTemperature } from './temperature.js';
 import {
   acknowledgeCommand, advanceWork, ingest, pendingCommands, queueCommand, readings,
   recordDecision, requireCondition, state,
@@ -21,7 +22,7 @@ const workUpdate = z.union([
 const digest = (value) => createHash('sha256').update(value).digest();
 const bearer = (req) => req.get('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
 
-export function createApp({ db, auth, publicConfig, deviceToken, simulator }) {
+export function createApp({ db, auth, publicConfig, deviceToken, simulator, temperatureCalibration = {} }) {
   const app = express();
   const demo = Boolean(simulator);
   const deviceHash = deviceToken ? digest(deviceToken) : null;
@@ -58,10 +59,18 @@ export function createApp({ db, auth, publicConfig, deviceToken, simulator }) {
   };
 
   app.get('/api/config', (req, res) => res.json({ demo, ...publicConfig }));
-  app.get('/api/state', owner, async (req, res) => res.json(await state(db, req.owner, demo)));
+  app.get('/api/state', owner, async (req, res) => {
+    const result = await state(db, req.owner, demo);
+    for (const building of result.buildings) {
+      if (building.reading) building.reading.sensors = addTemperature(building.reading.sensors, temperatureCalibration[building.id], building.source);
+    }
+    res.json(result);
+  });
   app.get('/api/activity', owner, async (req, res) => res.json((await state(db, req.owner, demo)).activity));
   app.get('/api/buildings/:id/readings', owner, async (req, res) => {
-    res.json(await readings(db, req.owner, buildingId.parse(req.params.id)));
+    const building = buildingId.parse(req.params.id);
+    const samples = await readings(db, req.owner, building);
+    res.json(samples.map((sample) => ({ ...sample, sensors: addTemperature(sample.sensors, temperatureCalibration[building], sample.source) })));
   });
   app.get('/api/incidents/:id', owner, async (req, res) => {
     const incidentId = id.parse(req.params.id);

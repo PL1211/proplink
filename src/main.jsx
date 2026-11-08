@@ -13,6 +13,15 @@ const tabs = [
 const date = (value) => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '—';
 const time = (value) => value ? new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '—';
 const nameOf = (id) => id === 'office' ? 'Office' : 'Data Center';
+const adc = (sensor) => sensor ? `${sensor.raw.toLocaleString()} ADC counts` : 'Awaiting reading';
+const degree = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1, minimumFractionDigits: 1 });
+const temperatureText = (sensor) => sensor?.temperature_c == null ? adc(sensor) :
+  `${sensor.temperature_status === 'room_estimate' ? '≈ ' : ''}${degree.format(sensor.temperature_c)} °C / ${degree.format(sensor.temperature_c * 9 / 5 + 32)} °F`;
+const temperatureNote = (sensor) => ({ room_estimate: 'Estimated from room reference', estimated: 'Estimated',
+  out_of_range: 'Outside estimate range' })[sensor.temperature_status] ?? 'Calibration needed';
+const flame = (sensor) => !sensor ? 'Awaiting reading' : sensor.ir_alert ? 'Alert detected' :
+  sensor.alert_seen_since_last_report ? 'Brief activation' : 'Clear';
+const fan = (reading) => !reading ? 'Awaiting status' : reading.commanded.fan === 'running' ? 'Running' : 'Stopped';
 const issueOf = (incident) => incident.kind === 'low_light' ? 'Unexpected low lighting' : 'IR sensor activation';
 const statusText = { queued: 'Contact queued', contacted: 'Contact recorded', accepted: 'Visit accepted', repair_reported: 'Awaiting verification', verified: 'Repair verified' };
 
@@ -74,22 +83,30 @@ function Metric({ label, value, detail, icon: Icon, tone }) {
     <strong>{value}</strong><small>{detail}</small></div>;
 }
 
+function BuildingReadings({ building }) {
+  const { reading } = building;
+  const office = building.id === 'office';
+  const sensors = reading?.sensors;
+  const temperature = sensors?.thermistor;
+  return <dl className="building-readings">
+    <div><dt>{office ? 'Ambient light' : 'Flame sensor'}</dt><dd>{office ? adc(sensors?.light) : flame(sensors?.flame_ir)}</dd></div>
+    <div><dt>Temperature sensor</dt><dd>{temperatureText(temperature)}{temperature && <small>{temperatureNote(temperature)} · {temperature.hot ? 'Heat flag active' : 'Heat flag inactive'}</small>}</dd></div>
+    <div><dt>Fan</dt><dd>{fan(reading)}{reading && <small>Controller reported · Speed unavailable</small>}</dd></div>
+  </dl>;
+}
+
 function BuildingCard({ building, incident, onView }) {
   const office = building.id === 'office';
   const Icon = office ? Building2 : Server;
-  const sensor = office ? building.reading?.sensors.light : building.reading?.sensors.flame_ir;
   const fresh = building.connection === 'fresh';
-  const reading = !sensor ? '—' : office ? sensor.raw.toLocaleString() : sensor.ir_alert ? 'Active' : 'Clear';
   const health = fresh ? incident ? ['amber', 'Needs attention'] : ['green', 'No open issues'] :
     ['neutral', building.connection === 'stale' ? 'Data stale' : 'Awaiting data'];
   return <article className="card building-card">
     <div className="row spread"><div className="row"><span className={'tile-icon site-icon ' + (office ? 'blue' : 'purple')}><Icon size={22} /></span>
-      <div><h3>{building.name}</h3><small>{office ? 'Lighting monitoring' : 'IR monitoring'}</small></div></div><Badge tone={health[0]}>{health[1]}</Badge></div>
-    <div className="building-reading"><span>{office ? 'Ambient light' : 'IR sensor signal'}</span><div><strong>{reading}</strong>
-      {office && sensor && <small> ADC counts</small>}</div>
-      <small>{building.captured_at ? `${fresh ? 'Last sample' : 'Last known sample'} · ${time(building.captured_at)}` : 'Waiting for first sample'}</small>
-    </div>
-    <button className="text-button" onClick={onView}>View sensor data <ArrowRight size={15} /></button>
+      <div><h3>{building.name}</h3><small>Sensor monitoring</small></div></div><Badge tone={health[0]}>{health[1]}</Badge></div>
+    <BuildingReadings building={building} />
+    <small>{building.captured_at ? `${fresh ? 'Last sample' : 'Last known sample'} · ${time(building.captured_at)}` : 'Waiting for first sample'}</small>
+    {onView && <button className="text-button" onClick={onView}>View sensor data <ArrowRight size={15} /></button>}
   </article>;
 }
 
@@ -154,25 +171,33 @@ function ActivityView({ events }) {
   </section>;
 }
 
-function ReadingsChart({ samples, office }) {
+function ReadingsChart({ samples, office, temperature = false }) {
   if (!samples.length) return <div className="empty">No readings in the last ten minutes.</div>;
+  const values = temperature ? samples.map(({ sensors }) => sensors.thermistor?.temperature_c).filter((value) => value != null) : [];
+  if (temperature && !values.length) return <div className="empty">No samples with a temperature estimate in the last ten minutes.</div>;
+  const low = temperature ? Math.floor(Math.min(...values)) : 0;
+  const high = temperature ? Math.max(low + 1, Math.ceil(Math.max(...values))) : 1;
   const oldest = new Date(samples[0].captured_at).getTime();
   const duration = Math.max(1, new Date(samples.at(-1).captured_at).getTime() - oldest);
-  const points = samples.map(({ captured_at, sensors }) => {
-    const value = office ? sensors.light.raw / sensors.light.adc_max : Number(sensors.flame_ir.ir_alert || sensors.flame_ir.alert_seen_since_last_report);
-    return `${8 + (new Date(captured_at).getTime() - oldest) / duration * 584},${140 - value * 125}`;
-  });
-  return <div className="chart"><svg viewBox="0 0 600 150" role="img" aria-label={office ? 'Relative ambient light history' : 'IR activation history'} preserveAspectRatio="none">
+  const segments = [];
+  let line;
+  for (const { captured_at, sensors } of samples) {
+    const value = temperature ? sensors.thermistor?.temperature_c : office ? sensors.light.raw / sensors.light.adc_max :
+      Number(sensors.flame_ir.ir_alert || sensors.flame_ir.alert_seen_since_last_report);
+    if (value == null) { line = null; continue; }
+    if (!line) segments.push(line = []);
+    line.push([8 + (new Date(captured_at).getTime() - oldest) / duration * 584, 140 - (value - low) / (high - low) * 125]);
+  }
+  return <div className="chart">{temperature && <small>Chart range: {low} to {high} °C</small>}
+    <svg viewBox="0 0 600 150" role="img" aria-label={temperature ? 'Estimated temperature history in Celsius' : office ? 'Relative ambient light history' : 'Flame sensor activation history'} preserveAspectRatio="none">
     {[15, 46, 78, 109, 140].map((y) => <line key={y} x1="8" x2="592" y1={y} y2={y} stroke="#e4eaf1" strokeDasharray="4 4" />)}
-    {points.length === 1 ? <circle cx="8" cy={points[0].split(',')[1]} r="4" fill="#2563eb" /> :
-      <polyline points={points.join(' ')} fill="none" stroke="#2563eb" strokeWidth="2.5" vectorEffect="non-scaling-stroke" />}
+    {segments.map((points, index) => points.length === 1 ? <circle key={index} cx={points[0][0]} cy={points[0][1]} r="4" fill="#2563eb" /> :
+      <polyline key={index} points={points.join(' ')} fill="none" stroke="#2563eb" strokeWidth="2.5" vectorEffect="non-scaling-stroke" />)}
     </svg><div className="row spread"><small>{time(samples[0].captured_at)}</small><small>{time(samples.at(-1).captured_at)}</small></div></div>;
 }
 
-function SensorsView({ buildings, incidents, selected, setSelected, token, commands, run, busy }) {
+function useSensorHistory(buildingId, token) {
   const [history, setHistory] = useState({ id: null, samples: [], error: '' });
-  const building = buildings.find((item) => item.id === selected) ?? buildings[0];
-  const buildingId = building.id;
   useEffect(() => {
     const controller = new AbortController();
     let timer;
@@ -190,34 +215,32 @@ function SensorsView({ buildings, incidents, selected, setSelected, token, comma
     load();
     return () => { controller.abort(); clearTimeout(timer); };
   }, [buildingId, token]);
+  return history.id === buildingId ? history : { samples: [], error: '' };
+}
+
+function SensorsView({ buildings, incidents, selected, setSelected, token }) {
+  const [sensor, setSensor] = useState('primary');
+  const building = buildings.find((item) => item.id === selected) ?? buildings[0];
+  const history = useSensorHistory(building.id, token);
   const office = building.id === 'office';
-  const samples = history.id === building.id ? history.samples : [];
-  const outputs = [['led_1', 'LED 1'], ['led_2', 'LED 2'], ['led_3', 'LED 3'], ['fan', 'Fan representation']];
+  const temperature = sensor === 'temperature';
+  const samples = temperature ? history.samples.filter((sample) => sample.sensors.thermistor) : history.samples;
+  const title = temperature ? 'Temperature sensor' : office ? 'Ambient light' : 'Flame sensor';
   return <>
     <div className="segmented" aria-label="Choose building">{buildings.map((item) => <button key={item.id} aria-pressed={building.id === item.id}
       className={building.id === item.id ? 'selected' : ''} onClick={() => setSelected(item.id)}>{item.name}</button>)}</div>
-    <div className="building-grid">
-      <BuildingCard building={building} incident={incidents.some((item) => item.building_id === building.id)}
-        onView={() => document.querySelector('#history').scrollIntoView({ behavior: 'smooth' })} />
-      <section className="card section-card"><h2>Controller outputs</h2><p>Commands and controller-reported state.</p>
-        <div className="outputs">{outputs.map(([key, title], index) => {
-          const reported = building.reading && (key === 'fan' ? building.reading.commanded.fan === 'running' : building.reading.commanded.leds[index]);
-          const command = commands.find((item) => item.building_id === building.id && item.output === key);
-          const target = command?.status === 'pending' ? command.enabled : reported;
-          return <div key={key} className="row spread"><div><strong>{title}</strong><small>{reported == null ? 'No reported state' :
-            `Reported ${reported ? 'on' : 'off'}${building.connection === 'stale' ? ' (stale)' : ''}`}{command ? ` · ${command.status}` : ''}</small></div>
-            <button className="button secondary small" aria-label={`Set ${title} ${target ? 'off' : 'on'}`} disabled={busy || building.connection !== 'fresh'}
-              onClick={() => run('/hardware/commands', { building_id: building.id, output: key, enabled: !target })}>{target ? 'Turn off' : 'Turn on'}</button></div>;
-        })}</div>
-      </section>
-    </div>
-    <section id="history" className="card section-card"><h2>{office ? 'Ambient light history' : 'IR activation history'}</h2>
-      <p>Recent {building.source === 'simulated' ? 'simulated ' : ''}samples · {office ? 'relative to ADC range' : 'clear or active signal'}</p>
-      {history.id === building.id && history.error && <p className="error" role="alert">{history.error}</p>}
-      <ReadingsChart samples={samples} office={office} />
+    <BuildingCard building={building} incident={incidents.some((item) => item.building_id === building.id)} />
+    <section className="card section-card"><div className="row spread wrap"><div><h2>{title} history</h2>
+      <p>Recent {building.source === 'simulated' ? 'simulated ' : ''}samples · {temperature ? 'Estimated temperatures' : office ? 'Relative to ADC range' : 'Clear or active signal'}</p></div>
+      <label className="inline-label">Sensor <select value={sensor} onChange={(event) => setSensor(event.target.value)}>
+        <option value="primary">{office ? 'Ambient light' : 'Flame sensor'}</option><option value="temperature">Temperature sensor</option>
+      </select></label></div>
+      {history.error && <p className="error" role="alert">{history.error}</p>}
+      <ReadingsChart samples={samples} office={office} temperature={temperature} />
       {!!samples.length && <table><thead><tr><th scope="col">Captured</th><th scope="col">Reading</th><th scope="col">Source</th></tr></thead><tbody>
         {samples.slice(-6).reverse().map((sample, index) => <tr key={sample.captured_at + index}><td>{time(sample.captured_at)}</td>
-          <td>{office ? `${sample.sensors.light.raw} ADC counts` : sample.sensors.flame_ir.ir_alert ? 'Active' : sample.sensors.flame_ir.alert_seen_since_last_report ? 'Brief activation' : 'Clear'}</td>
+          <td>{temperature ? temperatureText(sample.sensors.thermistor) : office ? adc(sample.sensors.light) : flame(sample.sensors.flame_ir)}
+            {temperature && sample.sensors.thermistor.temperature_c == null && <small className="reading-note">{temperatureNote(sample.sensors.thermistor)}</small>}</td>
           <td>{sample.source === 'simulated' ? 'Simulated' : 'Hardware'}</td></tr>)}
       </tbody></table>}
     </section>
@@ -306,44 +329,24 @@ function SettingsMenu({ view, setView, client, demo, email, openControls }) {
   </div>;
 }
 
-const outputList = [['led_1', 'LED 1'], ['led_2', 'LED 2'], ['led_3', 'LED 3'], ['fan', 'Fan representation']];
-function sceneState(building, commands, hasIncident) {
+const ledLabels = ['LED 1', 'LED 2', 'LED 3'];
+function sceneState(building, hasIncident) {
   const reading = building.reading;
-  const target = (key, index) => {
-    const reported = reading ? (key === 'fan' ? reading.commanded.fan === 'running' : !!reading.commanded.leds[index]) : false;
-    const command = commands.find((item) => item.building_id === building.id && item.output === key);
-    return command?.status === 'pending' ? !!command.enabled : reported;
-  };
   const light = reading?.sensors?.light;
   return {
-    leds: [0, 1, 2].map((index) => target('led_' + (index + 1), index)), fan: target('fan', 3),
+    leds: reading?.commanded.leds ?? [false, false, false], fan: reading?.commanded.fan === 'running',
     alert: !!reading?.sensors?.flame_ir?.ir_alert, light: light ? light.raw / light.adc_max : 0.5,
     status: building.connection !== 'fresh' ? 'offline' : hasIncident ? 'alert' : 'ok',
   };
 }
 
 function SensorHistory({ buildingId, token, office }) {
-  const [history, setHistory] = useState({ id: null, samples: [], error: '' });
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer;
-    async function load() {
-      try {
-        const samples = await api('/buildings/' + buildingId + '/readings', token, undefined, controller.signal);
-        if (!controller.signal.aborted) setHistory({ id: buildingId, samples, error: '' });
-      } catch (error) {
-        if (!controller.signal.aborted) setHistory((previous) => ({ id: buildingId, samples: previous.id === buildingId ? previous.samples : [], error: error.message }));
-      }
-      if (!controller.signal.aborted) timer = setTimeout(load, 2500);
-    }
-    load();
-    return () => { controller.abort(); clearTimeout(timer); };
-  }, [buildingId, token]);
+  const history = useSensorHistory(buildingId, token);
   return <>{history.error && <p className="error" role="alert">{history.error}</p>}
-    <ReadingsChart samples={history.id === buildingId ? history.samples : []} office={office} /></>;
+    <ReadingsChart samples={history.samples} office={office} /></>;
 }
 
-function World({ data, demo, busy, token, run, status, notices, settings, decide, work }) {
+function World({ data, demo, busy, token, status, notices, settings, decide, work }) {
   const [site, setSite] = useState(null);
   const [sel, setSel] = useState(null);
   const { canvasRef, labelsRef, engine, status: gl } = useEngine({ onSelect: setSel, onEnter: (id) => { setSite(id); setSel(null); } });
@@ -354,7 +357,7 @@ function World({ data, demo, busy, token, run, status, notices, settings, decide
   useEffect(() => {
     if (gl !== 'ready' || !data) return;
     engine.current.setState(Object.fromEntries(data.buildings.map((building) =>
-      [building.id, sceneState(building, data.commands, open.some((incident) => incident.building_id === building.id))])));
+      [building.id, sceneState(building, open.some((incident) => incident.building_id === building.id))])));
   }, [data, gl]); // eslint-disable-line react-hooks/exhaustive-deps
   const building = buildings.find((item) => item.id === site);
   const health = (item) => {
@@ -368,23 +371,21 @@ function World({ data, demo, busy, token, run, status, notices, settings, decide
     const office = building.id === 'office';
     if (sel === 'sensor') {
       const sensor = office ? building.reading?.sensors.light : building.reading?.sensors.flame_ir;
-      const value = !sensor ? '—' : office ? sensor.raw.toLocaleString() + ' ADC counts' : sensor.ir_alert ? 'Active' : 'Clear';
-      focus = <div className="card focus-card"><div className="row spread"><h3>{office ? 'Light sensor' : 'IR sensor'}</h3>
+      const value = office ? adc(sensor) : flame(sensor);
+      focus = <div className="card focus-card"><div className="row spread"><h3>{office ? 'Light sensor' : 'Flame sensor'}</h3>
         <button className="icon-button" aria-label="Clear selection" onClick={clearSelection}><X size={16} /></button></div>
         <strong className="focus-value">{value}</strong>
         <small>{building.captured_at ? `${building.connection === 'fresh' ? 'Last sample' : 'Last known sample'} · ${time(building.captured_at)}` : 'Waiting for first sample'}</small>
         <SensorHistory buildingId={building.id} token={token} office={office} /></div>;
     } else {
-      const index = outputList.findIndex(([key]) => key === sel);
-      const title = outputList[index][1];
-      const reported = building.reading && (sel === 'fan' ? building.reading.commanded.fan === 'running' : building.reading.commanded.leds[index]);
-      const command = data.commands.find((item) => item.building_id === building.id && item.output === sel);
-      const target = command?.status === 'pending' ? command.enabled : reported;
-      focus = <div className="card focus-card"><div className="row spread"><h3>{title}</h3>
+      const index = Number(sel.slice(-1)) - 1;
+      const isFan = sel === 'fan';
+      const led = building.reading?.commanded.leds[index];
+      const value = isFan ? fan(building.reading) : led == null ? 'Awaiting status' : led ? 'On' : 'Off';
+      focus = <div className="card focus-card"><div className="row spread"><h3>{isFan ? 'Fan' : ledLabels[index]}</h3>
         <button className="icon-button" aria-label="Clear selection" onClick={clearSelection}><X size={16} /></button></div>
-        <small>{reported == null ? 'No reported state' : `Reported ${reported ? 'on' : 'off'}${building.connection === 'stale' ? ' (stale)' : ''}`}{command ? ` · ${command.status}` : ''}</small>
-        <button className="button primary" aria-label={`Set ${title} ${target ? 'off' : 'on'}`} disabled={busy || building.connection !== 'fresh'}
-          onClick={() => run('/hardware/commands', { building_id: building.id, output: sel, enabled: !target })}>{target ? 'Turn off' : 'Turn on'}</button></div>;
+        <strong className="focus-value">{value}</strong>
+        {building.reading && <small>{building.connection === 'stale' ? 'Last controller report' : 'Controller reported'}{isFan && ' · Speed unavailable'}</small>}</div>;
     }
   }
   return <div className="world">
@@ -400,15 +401,16 @@ function World({ data, demo, busy, token, run, status, notices, settings, decide
         {buildings.map((item) => { const tone = health(item); const Icon = item.id === 'office' ? Building2 : Server;
           return <button key={item.id} className="card site-row" onClick={() => engine.current?.enter(item.id)}>
             <span className={'tile-icon site-icon ' + (item.id === 'office' ? 'blue' : 'purple')}><Icon size={22} /></span>
-            <span className="site-info"><strong>{item.name}</strong><small>{item.id === 'office' ? 'Lighting monitoring' : 'IR monitoring'}</small></span>
+            <span className="site-info"><strong>{item.name}</strong><small>Sensor monitoring</small></span>
             <Badge tone={tone[0]}>{tone[1]}</Badge></button>; })}
         <div className="card world-stats"><div><strong>{open.length}</strong><small>Open incidents</small></div><div><strong>{pending.length}</strong><small>Pending approvals</small></div></div>
       </>}
       {data && building && <>
         <button className="text-button back" onClick={() => engine.current?.exit()}><ArrowLeft size={15} /> All buildings</button>
         <div className="panel-head"><div className="row spread"><h2>{building.name}</h2><Badge tone={health(building)[0]}>{health(building)[1]}</Badge></div>
-          <p><MousePointerClick size={14} /> Click the sensor, LEDs or fan in the scene. Drag to look around.</p></div>
+          <p><MousePointerClick size={14} /> Click an item to inspect its status. Drag to look around.</p></div>
         {focus}
+        <div className="card world-readings"><h3>Latest readings</h3><BuildingReadings building={building} /></div>
         {incidents.filter((incident) => incident.building_id === building.id).map((incident) => <IncidentCard key={incident.id} incident={incident} demo={demo} busy={busy} decide={decide} work={work} />)}
         <div className="card recent"><h3>Recent activity</h3><EventList compact events={data.activity.filter((event) => event.building_id === building.id).slice(0, 4)} /></div>
       </>}
@@ -467,7 +469,7 @@ function Dashboard({ session, client, demo }) {
   const descriptions = {
     Overview: 'Monitor building conditions and manage maintenance requests.',
     Activity: 'Follow changes across your buildings and service requests.',
-    'Sensor Data': 'Inspect recent readings and check controller outputs.',
+    'Sensor Data': 'Inspect recent sensor readings and reported fan status.',
   };
   const modals = <>
     {confirm && <Modal title={confirm.decision === 'approved' ? 'Approve technician visit' : 'Decline technician visit'} close={() => setConfirm(null)}>
@@ -489,7 +491,7 @@ function Dashboard({ session, client, demo }) {
   const settingsMenu = <SettingsMenu view={view} setView={changeView} client={client} demo={demo} email={session?.user?.email}
     openControls={() => { setActionError(''); setControls(true); }} />;
   if (view === '3d') return <div className="world-shell">
-    <World data={data} demo={demo} busy={busy} token={token} run={run} status={statusBadge} notices={notices} settings={settingsMenu}
+    <World data={data} demo={demo} busy={busy} token={token} status={statusBadge} notices={notices} settings={settingsMenu}
       decide={(item, decision) => { setActionError(''); setConfirm({ item, decision }); }}
       work={(item, body) => run('/work-orders/' + item.work_id + '/progress', body)} />
     {modals}
@@ -539,8 +541,7 @@ function Dashboard({ session, client, demo }) {
           </div>
         </>}
         {data && tab === 'Activity' && <ActivityView events={data.activity} />}
-        {data && tab === 'Sensor Data' && <SensorsView buildings={data.buildings} incidents={open} selected={selected} setSelected={setSelected} token={token}
-          commands={data.commands} run={run} busy={busy} />}
+        {data && tab === 'Sensor Data' && <SensorsView buildings={data.buildings} incidents={open} selected={selected} setSelected={setSelected} token={token} />}
       </main>
     </div>
     {modals}

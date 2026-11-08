@@ -2,6 +2,8 @@
 
 BuildingConnect is a React dashboard and Express API for monitoring the office and data-center models and tracking maintenance. The local demo uses simulated UNO Q snapshots and a persistent embedded Postgres database. The Supabase mode uses the same SQL schema and workflow with Supabase Postgres and Auth.
 
+The office dashboard shows ambient light, temperature sensor readings, and fan status. The data center shows flame sensor status, temperature sensor readings, and fan status. The dashboard monitors the equipment; it does not send LED or fan commands.
+
 ## Run the local demo
 
 Use Node.js 22.12 or newer.
@@ -33,7 +35,7 @@ In Supabase mode, an authorized owner can manually record technician contact and
 
 ## UNO Q interface
 
-The adapter connects over HTTPS in a hosted setup. Use `Authorization: Bearer <DEVICE_TOKEN>` for the three device routes below. `GET /api/state`, owner decisions, work-order progress, and command creation use the owner's Supabase session.
+The [UNO Q adapter](hardware/uno-q/README.md) uploads telemetry over HTTPS using `Authorization: Bearer <DEVICE_TOKEN>`. Command routes remain available for a future adapter that supports controls. `GET /api/state`, owner decisions, work-order progress, and command creation use the owner's Supabase session.
 
 | Method and route | Contract |
 | --- | --- |
@@ -52,18 +54,24 @@ The adapter connects over HTTPS in a hosted setup. Use `Authorization: Bearer <D
   "source": "hardware",
   "buildings": {
     "office": {
-      "sensors": { "light": { "raw": 744, "adc_max": 1023, "unit": "adc_counts" } },
+      "sensors": {
+        "light": { "raw": 744, "adc_max": 1023, "unit": "adc_counts" },
+        "thermistor": { "raw": 498, "adc_max": 1023, "unit": "adc_counts", "hot": false }
+      },
       "commanded": { "leds": [true, true, true], "fan": "running" }
     },
     "data_center": {
-      "sensors": { "flame_ir": { "digital_level": 0, "ir_alert": false, "alert_seen_since_last_report": false } },
+      "sensors": {
+        "flame_ir": { "digital_level": 0, "ir_alert": false, "alert_seen_since_last_report": false },
+        "thermistor": { "raw": 512, "adc_max": 1023, "unit": "adc_counts", "hot": false }
+      },
       "commanded": { "leds": [true, true, true], "fan": "stopped" }
     }
   }
 }
 ```
 
-Use the actual capture time, ADC maximum, and verified IR polarity. For local simulator scenarios, use the dashboard's **Demo controls**.
+Use the actual capture time, ADC maximum, and verified IR polarity. `thermistor` is optional for older firmware and carries a raw count and a controller heat flag. The backend calculates temperature estimates using the separate [KY-028 calibration profiles](hardware/uno-q/README.md#calibrate-the-ky-028-temperature-sensors), and the dashboard displays Celsius and Fahrenheit. The `commanded` fan state reflects the controller's request; the adapter has no fan speed or motion feedback. For local simulator scenarios, use the dashboard's **Demo controls**.
 
 ## Checks
 

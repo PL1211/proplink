@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { createApp } from '../server/app.js';
 import { openDemoDatabase } from '../server/db.js';
 import { demoOwner, demoSnapshot } from '../server/demo.js';
+import { parseTemperatureCalibration } from '../server/temperature.js';
 import { advanceWork, ingest, recordDecision, state } from '../server/workflow.js';
 
 const otherOwner = '00000000-0000-4000-8000-000000000002';
@@ -58,7 +59,10 @@ test('HTTP validates credentials, separates measured from historical data, and b
   await db.query('insert into bc.memberships select $1,id from bc.buildings', [demoOwner]);
   const token = 'test-device-credential-with-over-32-characters';
   const auth = { getUser: async (value) => ({ data: { user: value === 'owner' ? { id: demoOwner } : null } }) };
-  const server = createApp({ db, auth, deviceToken: token }).listen(0, '127.0.0.1');
+  const temperatureCalibration = parseTemperatureCalibration(JSON.stringify({
+    office: { adc_max: 1023, points: [{ raw: 500, celsius: 20 }, { raw: 480, celsius: 22 }] },
+  }));
+  const server = createApp({ db, auth, deviceToken: token, temperatureCalibration }).listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(async () => {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -74,12 +78,28 @@ test('HTTP validates credentials, separates measured from historical data, and b
   assert.equal((await request('/hardware/telemetry', token, {})).status, 422);
   const now = Date.now();
   const historical = { ...sample(0, now - 10000, { ir: true }), source: 'hardware' };
-  assert.equal((await (await request('/hardware/telemetry', token, historical)).json()).current, false);
+  // Older UNO Q firmware still posts both buildings without thermistor data.
+  for (const building of Object.values(historical.buildings)) delete building.sensors.thermistor;
+  const oldResponse = await request('/hardware/telemetry', token, historical);
+  assert.equal(oldResponse.status, 200);
+  assert.equal((await oldResponse.json()).current, false);
   let current = await (await request('/state', 'owner')).json();
   assert.equal(current.buildings[0].connection, 'no_data');
   assert.equal(current.incidents.length, 0);
-  assert.equal((await request('/hardware/telemetry', token, { ...sample(1, now, { ir: true }), source: 'hardware' })).status, 200);
+  const live = { ...sample(1, now, { ir: true }), source: 'hardware' };
+  const invalid = structuredClone(live);
+  invalid.buildings.office.sensors.thermistor.raw = 1024;
+  assert.equal((await request('/hardware/telemetry', token, invalid)).status, 422);
+  assert.equal((await request('/hardware/telemetry', token, live)).status, 200);
   current = await (await request('/state', 'owner')).json();
+  for (const building of current.buildings) {
+    const temperature = { ...live.buildings[building.id].sensors.thermistor, ...(building.id === 'office'
+      ? { temperature_c: 20.9, temperature_status: 'estimated' }
+      : { temperature_c: null, temperature_status: 'uncalibrated' }) };
+    assert.deepEqual(building.reading.sensors.thermistor, temperature);
+    const history = await (await request(`/buildings/${building.id}/readings`, 'owner')).json();
+    assert.deepEqual(history.map((item) => item.sensors.thermistor), [undefined, temperature]);
+  }
   assert.equal(current.incidents[0].kind, 'ir_alert');
   const decision = '/service-requests/' + current.incidents[0].request_id + '/decision';
   assert.equal((await request(decision, 'owner', { version: 1, decision: 'declined' })).status, 200);
@@ -93,4 +113,11 @@ test('HTTP validates credentials, separates measured from historical data, and b
   });
   assert.equal((await ack.json()).status, 'applied');
   assert.deepEqual(await (await request('/hardware/commands', token)).json(), []);
+
+  const outsideRange = { ...sample(2, now + 1), source: 'hardware' };
+  outsideRange.buildings.office.sensors.thermistor.raw = 540;
+  assert.equal((await request('/hardware/telemetry', token, outsideRange)).status, 200);
+  const history = await (await request('/buildings/office/readings', 'owner')).json();
+  assert.equal(history.at(-1).sensors.thermistor.temperature_c, null);
+  assert.equal(history.at(-1).sensors.thermistor.temperature_status, 'out_of_range');
 });

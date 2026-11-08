@@ -24,14 +24,23 @@ export async function openDemoDatabase(path = '.data/demo') {
   return db;
 }
 
-export function openSupabaseDatabase(connectionString) {
+export function openSupabaseDatabase(connectionString, certificate) {
   const url = new URL(connectionString);
-  url.searchParams.set('sslmode', 'verify-full');
+  let ssl;
+  if (certificate) {
+    for (const key of ['ssl', 'sslmode', 'sslrootcert', 'sslcert', 'sslkey']) url.searchParams.delete(key);
+    ssl = { ca: certificate, rejectUnauthorized: true };
+  } else {
+    url.searchParams.set('sslmode', 'verify-full');
+  }
   const pool = new pg.Pool({
     connectionString: url.toString(),
+    ssl,
     max: 5,
     connectionTimeoutMillis: 5000,
     statement_timeout: 5000,
+    idleTimeoutMillis: 5000,
+    allowExitOnIdle: true,
   });
   pool.on('error', (error) => console.error('Database connection:', error.code ?? error.name));
   return {

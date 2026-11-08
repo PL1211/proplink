@@ -15,7 +15,9 @@ The Wi-Fi device should show `connected`. For a LAN test, join the same network 
 
 ## Give the board a backend address
 
-Use your deployed HTTPS backend URL if available. For a temporary test on a trusted private network, run `ipconfig` in Windows PowerShell and find the IPv4 address of the Wi-Fi adapter. From the BuildingConnect repo, start a second listener using that address. Replace the example IP below with your computer's IP.
+Use the hosted backend at `https://buildingconnect.vercel.app`. From the UNO Q terminal, run `curl https://buildingconnect.vercel.app/api/config` to verify it can reach the server.
+
+For a local test on a trusted private network, run `ipconfig` in Windows PowerShell and find the IPv4 address of the Wi-Fi adapter. From the BuildingConnect repo, start a second listener using that address. Replace the example IP below with your computer's IP.
 
 ```powershell
 npm.cmd run build
@@ -33,11 +35,23 @@ In the UNO Q terminal, run `curl http://192.168.1.25:5175/api/config` using the 
 
    ```json
    {
-     "backend_url": "http://192.168.1.25:5175",
+     "backend_url": "https://buildingconnect.vercel.app",
      "device_token": "paste the DEVICE_TOKEN value here"
    }
    ```
 
-3. Click **Run** in App Lab. Look for **Sent reading** in the Python console and check the dashboard for live readings. The Serial Monitor still prints raw thermistor counts for local debugging. [Running and monitoring an App](https://docs.arduino.cc/software/app-lab/apps/run/)
+3. Click **Run** in App Lab. Look for **Sent reading** in the Python console and check **Sensor Data** in the dashboard for both buildings. Compare the temperature sensor counts to the Serial Monitor. [Running and monitoring an App](https://docs.arduino.cc/software/app-lab/apps/run/)
 
-The starter sends office light and data-center IR readings. It retains the supplied pin assignments, always-on LEDs, and servo behavior. Confirm the flame module's active level against the Serial Monitor during the bench test. The sketch still uses `HIGH` as active. Dashboard LED and fan commands need a separate device handler.
+The office sends ambient light, thermistor counts, and fan status. The data center sends flame sensor status, thermistor counts, and fan status. The heat flag is based on a change from the startup baseline or the thermistor module's digital output. During the bench test, confirm the flame module's active level against the Serial Monitor; the sketch uses `HIGH` as active.
+
+The sketch keeps the supplied pin assignments, always-on LEDs, and servo behavior. Fan status reflects the controller's request to move the servo. Fan speed and actual movement are not measured. The dashboard only monitors the hardware.
+
+## Calibrate the KY-028 temperature sensors
+
+1. Put a reference thermometer next to each module. Let the reading settle, then record the thermometer's temperature and the average `temp=` count from the Serial Monitor for each building. `temp=` is a raw count; `base=` is the startup count.
+2. Repeat at a different stable temperature. Choose two temperatures that bracket the range you want to display. Additional reference points can improve estimates over a wider range.
+3. Set `THERMISTOR_CALIBRATION` in the backend environment with separate profiles for `office` and `data_center`. Each profile takes `adc_max` (1023 for the included sketch) and `points` of `{ "raw": 510, "celsius": 20 }`. These numbers are examples; enter measured pairs. See [`.env.example`](../../.env.example) for the JSON format. Redeploy after setting it in Vercel. The UNO Q keeps uploading the same raw counts.
+
+With multiple references, the dashboard estimates Celsius and Fahrenheit between calibrated points. It shows raw counts outside that range or when a sensor has no calibration. Keep the setup and the KY-028 dial fixed while collecting references. [KY-028 module documentation](https://sensorkit.joy-it.net/en/sensors/ky-028)
+
+For a rough room-temperature estimate, a profile can use a single `reference` object with `raw` and `celsius` in place of `points`. This assumes a KY-028 whose analog count falls as it warms and whose divider supply matches the ADC reference. The dashboard marks these values as estimates from the room reference and shows raw counts beyond 10 °C from it.

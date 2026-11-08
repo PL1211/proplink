@@ -1,9 +1,9 @@
 import { createServer } from 'node:http';
-import { createClient } from '@supabase/supabase-js';
 import express from 'express';
 import { createApp } from './app.js';
-import { openDemoDatabase, openSupabaseDatabase } from './db.js';
+import { openDemoDatabase } from './db.js';
 import { createDemo } from './demo.js';
+import { createSupabaseRuntime } from './supabase.js';
 
 const mode = process.env.APP_MODE ?? 'demo';
 const host = process.env.HOST ?? '127.0.0.1';
@@ -13,22 +13,17 @@ if (!['demo', 'supabase'].includes(mode)) throw new Error('APP_MODE must be demo
 if (mode === 'demo' && host !== '127.0.0.1') throw new Error('Demo mode must bind to 127.0.0.1.');
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
 
-const { DATABASE_URL, SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, DEVICE_TOKEN } = process.env;
-if (mode === 'supabase' && (!DATABASE_URL || !SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY?.startsWith('sb_publishable_') ||
-    (DEVICE_TOKEN?.length ?? 0) < 32)) {
-  throw new Error('Supabase mode requires DATABASE_URL, SUPABASE_URL, a publishable key, and a device token of at least 32 characters.');
+let simulator;
+let runtime;
+if (mode === 'demo') {
+  const db = await openDemoDatabase(process.env.DEMO_DB_PATH);
+  simulator = await createDemo(db);
+  runtime = { db, app: createApp({ db, simulator, deviceToken: process.env.DEVICE_TOKEN }) };
+} else {
+  runtime = createSupabaseRuntime();
+  await runtime.db.query('select id from bc.devices limit 1');
 }
-const db = mode === 'demo' ? await openDemoDatabase(process.env.DEMO_DB_PATH) : openSupabaseDatabase(DATABASE_URL);
-await db.query('select id from bc.devices limit 1');
-const simulator = mode === 'demo' ? await createDemo(db) : null;
-const auth = mode === 'supabase' ? createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-}).auth : null;
-
-const app = createApp({
-  db, auth, simulator, deviceToken: DEVICE_TOKEN,
-  publicConfig: auth ? { url: SUPABASE_URL, publishableKey: SUPABASE_PUBLISHABLE_KEY } : {},
-});
+const { app, db } = runtime;
 const server = createServer(app);
 const vite = dev ? await (await import('vite')).createServer({
   server: { middlewareMode: { server }, hmr: { server } },

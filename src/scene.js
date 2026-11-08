@@ -9,7 +9,7 @@ const SITES = {
   data_center: { x: 9, w: 10, d: 8, h: 4, shell: 0x8e78ff, accent: 0xb09cff, name: 'Data Center' },
 };
 const STATUS_COLOR = { ok: 0x35d49a, alert: 0xffb02e, offline: 0x7b8aa3 };
-const SENSOR_LABEL = { office: 'Light sensor', data_center: 'IR sensor' };
+const SENSOR_LABEL = { office: 'Light sensor', data_center: 'Flame sensor' };
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const lerp = (a, b, k) => a + (b - a) * k;
 const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);

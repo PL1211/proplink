@@ -8,11 +8,14 @@ const commanded = z.object({
   leds: z.tuple([z.boolean(), z.boolean(), z.boolean()]),
   fan: z.enum(['running', 'stopped']),
 });
-const light = z.object({
+const adcReading = z.object({
   raw: z.number().int().nonnegative(),
   adc_max: z.number().int().positive().max(65535),
   unit: z.literal('adc_counts'),
-}).refine(({ raw, adc_max }) => raw <= adc_max, 'Reading exceeds ADC maximum');
+});
+const inAdcRange = ({ raw, adc_max }) => raw <= adc_max;
+const light = adcReading.refine(inAdcRange, 'Reading exceeds ADC maximum');
+const thermistor = adcReading.extend({ hot: z.boolean() }).refine(inAdcRange, 'Reading exceeds ADC maximum').optional();
 
 export const snapshot = z.object({
   schema_version: z.literal(1),
@@ -23,9 +26,10 @@ export const snapshot = z.object({
   captured_at: z.iso.datetime({ offset: true }),
   source: z.enum(['hardware', 'simulated']),
   buildings: z.object({
-    office: z.object({ sensors: z.object({ light }), commanded }),
+    office: z.object({ sensors: z.object({ light, thermistor }), commanded }),
     data_center: z.object({
       sensors: z.object({
+        thermistor,
         flame_ir: z.object({
           digital_level: z.union([z.literal(0), z.literal(1)]),
           ir_alert: z.boolean(),

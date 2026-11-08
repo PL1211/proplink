@@ -5,17 +5,19 @@ import { acknowledgeCommand, ingest, pendingCommands } from './workflow.js';
 export const demoOwner = '00000000-0000-4000-8000-000000000001';
 
 export function demoSnapshot({ boot, sequence, captured, dark, ir, outputs }) {
+  const thermistor = (raw, hot = false) => ({ raw, adc_max: 1023, unit: 'adc_counts', hot });
   return {
     schema_version: 1, device_id: deviceId, boot_id: boot, sequence, mcu_uptime_ms: sequence * 1500,
     captured_at: captured.toISOString(), source: 'simulated',
     buildings: {
       office: {
         sensors: { light: { raw: outputs.office.leds.some(Boolean) ? (dark ? 280 : 744) + sequence % 19 : 64,
-          adc_max: 1023, unit: 'adc_counts' } },
+          adc_max: 1023, unit: 'adc_counts' }, thermistor: thermistor(490 + sequence % 10) },
         commanded: outputs.office,
       },
       data_center: {
-        sensors: { flame_ir: { digital_level: ir ? 1 : 0, ir_alert: ir, alert_seen_since_last_report: ir } },
+        sensors: { flame_ir: { digital_level: ir ? 1 : 0, ir_alert: ir, alert_seen_since_last_report: ir },
+          thermistor: thermistor((ir ? 590 : 510) + sequence % 13, ir) },
         commanded: outputs.data_center,
       },
     },

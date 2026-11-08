@@ -26,7 +26,7 @@ class Uploader:
             self.reported_activations = 0
         self.uptime = uptime
 
-        return {
+        payload = {
             "schema_version": 1,
             "device_id": "unoq-main",
             "boot_id": self.boot_id,
@@ -58,6 +58,14 @@ class Uploader:
                 },
             },
         }
+        for building, prefix in (("office", "office"), ("data_center", "dc")):
+            raw_key, hot_key = f"{prefix}_temp_raw", f"{prefix}_hot"
+            if raw_key in reading and hot_key in reading:
+                payload["buildings"][building]["sensors"]["thermistor"] = {
+                    "raw": reading[raw_key], "adc_max": 1023, "unit": "adc_counts",
+                    "hot": bool(reading[hot_key]),
+                }
+        return payload
 
     def send(self, reading):
         payload = self.payload(reading)

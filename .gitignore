@@ -4,6 +4,7 @@ dist/
 .npm-cache/
 .env
 .env.*
+.vercel/
 !.env.example
 supabase/.temp/
 hardware/uno-q/python/device.json

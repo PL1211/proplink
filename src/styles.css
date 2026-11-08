@@ -79,9 +79,14 @@ main { max-width: 1440px; margin: 0 auto; padding: 31px 31px 48px; display: grid
 .building-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .building-card { padding: 15px 16px 13px; }
 .site-icon { width: 42px; height: 42px; }
-.building-reading { display: grid; gap: 2px; margin-top: 13px; padding: 10px 12px; border: 1px solid #eaf0f6; border-radius: 8px; background: #f7f9fd; }
-.building-reading > span { font-size: 12px; font-weight: 630; color: #4d5f77; }
-.building-reading strong { font-size: 24px; letter-spacing: -.03em; }
+.building-readings { margin: 12px 0 8px; }
+.building-readings > div { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 8px 0; border-top: 1px solid #edf1f6; }
+.building-readings dt { font-size: 13px; color: #4d5f77; }
+.building-readings dd { margin: 0; text-align: right; font-size: 14px; font-weight: 680; }
+.building-readings dd small { display: block; margin-top: 2px; font-weight: 450; }
+.world-readings { padding: 14px; }
+.world-readings .building-readings { margin-bottom: 0; }
+.world-readings .building-readings > div:last-child { padding-bottom: 0; }
 .text-button { display: inline-flex; align-items: center; gap: 6px; background: transparent; color: #2258b8; border: 0; padding: 4px 0; font-weight: 700; font-size: 12px; }
 .text-button:hover { text-decoration: underline; }
 .building-card > .text-button { margin-top: 8px; }
@@ -123,14 +128,12 @@ textarea { min-height: 62px; resize: vertical; }
 .segmented { display: inline-flex; justify-self: start; background: #eaf0f8; padding: 3px; border-radius: 8px; }
 .segmented button { padding: 7px 12px; border: 1px solid transparent; background: transparent; border-radius: 6px; color: #455771; font-weight: 640; font-size: 13px; }
 .segmented .selected { background: #fff; color: #2258b8; border-color: #dce5f2; }
-.outputs { margin-top: 9px; }
-.outputs > div { border-top: 1px solid #edf1f6; padding: 8px 0; font-size: 13px; }
-.outputs small { display: block; margin-top: 2px; }
 .chart { margin: 14px 0; }
 .chart svg { display: block; width: 100%; height: 160px; }
 table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
 th, td { padding: 8px 5px; border-bottom: 1px solid #edf1f6; }
 th { color: #485b74; }
+.reading-note { display: block; }
 dialog { border: 1px solid var(--line); border-radius: 12px; width: min(100% - 30px, 480px); padding: 0; color: #17263b; box-shadow: 0 16px 65px #101d2c30; }
 dialog::backdrop { background: #101d2c78; }
 .modal-content { padding: 20px; }

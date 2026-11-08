@@ -190,11 +190,13 @@ void sampleIr() {
 
 // The Python process on the UNO Q reads this through Arduino Bridge.
 String snapshot() {
- char json[160];
+ char json[260];
  snprintf(json, sizeof(json),
-          "{\"uptime_ms\":%lu,\"light\":%d,\"ir_level\":%d,\"ir_active\":%d,\"ir_activations\":%lu,\"office_fan\":%d,\"dc_fan\":%d}",
+          "{\"uptime_ms\":%lu,\"light\":%d,\"ir_level\":%d,\"ir_active\":%d,\"ir_activations\":%lu,"
+          "\"office_fan\":%d,\"dc_fan\":%d,\"office_temp_raw\":%d,\"office_hot\":%d,\"dc_temp_raw\":%d,\"dc_hot\":%d}",
           millis(), lightRaw, flameLevel, fire, irActivations,
-          SERVOS_ENABLED && needsVent(0), SERVOS_ENABLED && needsVent(1));
+          SERVOS_ENABLED && needsVent(0), SERVOS_ENABLED && needsVent(1),
+          raw[0], hot[0], raw[1], hot[1]);
  return String(json);
 }
 
