@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.data/
+.npm-cache/
+.env
+.env.*
+!.env.example
+supabase/.temp/
+hardware/uno-q/python/device.json
