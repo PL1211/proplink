@@ -4,6 +4,8 @@ BuildingConnect is a React dashboard and Express API for monitoring the office a
 
 The office dashboard shows ambient light, temperature sensor readings, and fan status. The data center shows flame sensor status, temperature sensor readings, and fan status. The dashboard monitors the equipment; it does not send LED or fan commands.
 
+See the [project overview](PROJECT_OVERVIEW.md) for the deployed architecture, verified hardware snapshot, five MVP specs, and remaining work.
+
 ## Run the local demo
 
 Use Node.js 22.12 or newer.
@@ -29,7 +31,7 @@ The demo stores progress in `.data/demo` and binds to loopback. To start another
    ```
 
 3. Copy `.env.example` to `.env` if it doesn't exist, set `APP_MODE=supabase`, and fill in `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and `DEVICE_TOKEN`. On IPv4-only networks, copy the **Session pooler** connection string from the project's **Connect** dialog. Use a database role that can access the private `bc` schema. Keep the database URL and device credential on the server. The browser receives only the project URL and publishable key. [Supabase connection options](https://supabase.com/docs/guides/database/connecting-to-postgres)
-4. Start the app and sign in. The hosted view starts with no telemetry. Configure the office `bc.buildings.light_min_ratio` using real bench calibration before expecting automatic low-light detection. The default `null` leaves that rule disabled. Set `lights_expected_on` to false during periods when office lighting is intentionally off.
+4. Start the app and sign in. A fresh project shows no data until the first telemetry upload. Configure the office `bc.buildings.light_min_ratio` using real bench calibration before expecting automatic low-light detection. The default `null` leaves that rule disabled. Set `lights_expected_on` to false during periods when office lighting is intentionally off.
 
 In Supabase mode, an authorized owner can manually record technician contact and acceptance. The app records one queued contact action after approval. Live dispatch and automated technician updates require the future communications integration.
 
