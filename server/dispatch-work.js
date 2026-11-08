@@ -7,7 +7,10 @@ const updates = {
   report: 'Repair findings are ready for your verification in the dashboard.',
   verify: 'The repair was verified and the incident is resolved.',
 };
-const issue = { low_light: 'sustained low light', ir_alert: 'an IR sensor activation' };
+function issue({ kind, evidence }) {
+  if (kind === 'ir_alert') return 'an IR sensor activation';
+  return evidence?.direction === 'high' ? 'sustained bright light' : 'sustained low light';
+}
 
 export function createPhotonClient(config) {
   let sdk;
@@ -35,7 +38,7 @@ export function createPhotonClient(config) {
 async function requestContext(db, job, lock = false) {
   const { requestId, investigationId = requestId } = job.payload;
   return one(db, `
-    select i.id,i.kind,i.building_id,b.name,r.status,r.recommendation,r.expires_at,n.assessment,n.status as investigation_status
+    select i.id,i.kind,i.evidence,i.building_id,b.name,r.status,r.recommendation,r.expires_at,n.assessment,n.status as investigation_status
     from bc.incidents i join bc.buildings b on b.id=i.building_id join bc.service_requests r on r.incident_id=i.id
     left join bc.investigations n on n.request_id=$3
     where i.id=$1 and r.id=$2 and i.source='hardware' and i.status='open'${lock ? ' for update of r' : ''}`,
@@ -44,7 +47,7 @@ async function requestContext(db, job, lock = false) {
 
 async function workContext(db, job, lock = false) {
   return one(db, `
-    select i.id,i.building_id,i.kind,b.name,w.id as work_id,w.status as work_status,a.status as contact_status
+    select i.id,i.building_id,i.kind,i.evidence,b.name,w.id as work_id,w.status as work_status,a.status as contact_status
     from bc.incidents i join bc.buildings b on b.id=i.building_id join bc.service_requests r on r.incident_id=i.id
     join bc.work_orders w on w.request_id=r.id join bc.outbound_actions a on a.work_order_id=w.id
     where i.id=$1 and w.id=$2 and i.source='hardware' and r.status='approved'${lock ? ' for update of w' : ''}`,
@@ -69,7 +72,7 @@ async function messagePlan(db, job, lock = false) {
       return { context, role: 'owner', body: `BuildingConnect · ${context.name}\n${context.assessment.question}\nReply ANSWER ${ref} followed by your answer.` };
     }
     const { observation, uncertainty } = context.assessment ?? {};
-    const summary = observation && uncertainty ? `${observation}\nUncertainty: ${uncertainty}` : `Observed ${issue[context.kind]}. The cause needs inspection.`;
+    const summary = observation && uncertainty ? `${observation}\nUncertainty: ${uncertainty}` : `Observed ${issue(context)}. The cause needs inspection.`;
     return { context, role: 'owner', body: `BuildingConnect · ${context.name}\n${summary}\nProposed inspection: ${context.recommendation}\nReply APPROVE ${ref} or DECLINE ${ref}.` };
   }
   if (job.kind === 'reply_help') {
@@ -84,7 +87,7 @@ async function messagePlan(db, job, lock = false) {
     return { context, role: 'owner', body: `BuildingConnect · ${context.name}\n${updates[job.payload.action]}\n${ref}` };
   }
   if (context.work_status !== 'queued' || context.contact_status !== 'queued') return null;
-  return { context, role: 'technician', body: `BuildingConnect · ${context.name}\nThe owner approved an inspection for ${issue[context.kind]}. Please inspect and report what you find.\nReply ACCEPT ${ref} or DECLINE ${ref}. After the visit, reply REPORT ${ref} followed by your findings.` };
+  return { context, role: 'technician', body: `BuildingConnect · ${context.name}\nThe owner approved an inspection for ${issue(context)}. Please inspect and report what you find.\nReply ACCEPT ${ref} or DECLINE ${ref}. After the visit, reply REPORT ${ref} followed by your findings.` };
 }
 
 function timed(promise, ms = 25_000) {

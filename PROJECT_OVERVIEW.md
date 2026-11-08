@@ -38,7 +38,7 @@ Both temperature profiles use the room display's **71.7 °F (22.1 °C)** as a re
 
 ## Workflow and operating rules
 
-1. The uploader sends one versioned snapshot for both buildings. The backend deduplicates by device, boot ID and sequence. Old and out-of-order samples cannot replace the latest reading or open an incident. Both buildings show stale data after five seconds without a fresh sample.
+1. The uploader sends one versioned snapshot for both buildings. The backend deduplicates by device, boot ID and sequence. Old and out-of-order samples cannot replace the latest reading or open an incident. Both buildings show stale data after 15 seconds without a fresh sample.
 2. The office can open one low-light incident when the lights are expected and reported on and readings stay below the configured threshold for three seconds. The production threshold is currently unset. The local demo has a threshold and seeds a low-light incident.
 3. A fresh active or briefly latched flame/IR signal can open one data-center incident. The backend records evidence and proposes inspection. Temperature is informational and does not open incidents.
 4. The owner approves or declines the versioned request. Approval creates one work order and one queued contact action in a transaction. Decline leaves the issue open. The owner can then record contact, acceptance and repair findings.

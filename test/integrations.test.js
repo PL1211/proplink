@@ -36,7 +36,8 @@ test('shared Photon iMessage replies survive worker restart and use the existing
   const db = await openDemoDatabase('memory://');
   t.after(() => db.close());
   await db.query('insert into bc.memberships select $1,id from bc.buildings', [demoOwner]);
-  await db.query("update bc.buildings set light_min_ratio=0.48 where id='office'");
+  const baseline = 891 / 1023;
+  await db.query("update bc.buildings set light_baseline_ratio=$1,light_min_ratio=$2 where id='office'", [baseline, baseline * 0.65]);
 
   const server = createApp({ db, integrations: config }).listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -73,13 +74,13 @@ test('shared Photon iMessage replies survive worker restart and use the existing
         const { messages } = JSON.parse(request.body);
         const steps = ['get_incident', 'get_sensor_history', 'search_verified_repairs', 'submit_assessment'];
         const name = steps[turn++];
-        if (name === 'get_sensor_history') assert.equal(JSON.parse(messages.at(-1).content).kind, 'low_light');
-        if (name === 'search_verified_repairs') assert.equal(JSON.parse(messages.at(-1).content).length, 2);
+        if (name === 'get_sensor_history') assert.equal(JSON.parse(messages.at(-1).content).kind, 'high_light');
+        if (name === 'search_verified_repairs') assert.equal(JSON.parse(messages.at(-1).content).at(-1).sensors.light.raw, 990);
         const outcome = options.ownerReply ? 'inspect' : 'clarify';
         const args = name === 'submit_assessment' ? {
-          outcome, observation: 'Light was below the bench threshold.', uncertainty: 'Obstruction is possible.',
+          outcome, observation: 'Light was above the bench threshold.', uncertainty: 'An extra light source is possible.',
           recommendation: 'Inspect the lighting circuit.', repair_ids: [],
-          ...(outcome === 'clarify' ? { question: 'Is anything covering the light sensor?' } : {}),
+          ...(outcome === 'clarify' ? { question: 'Was an extra light source turned on?' } : {}),
         } : {};
         return Response.json({ choices: [{ message: { tool_calls: [
           { id: `call-${turn}`, type: 'function', function: { name, arguments: JSON.stringify(args) } },
@@ -88,17 +89,27 @@ test('shared Photon iMessage replies survive worker restart and use the existing
     },
   };
   let worker = createIntegrationWorker(db, config, clients);
-  const captured = new Date(Date.now() - 13_000);
-  const dark = new Date(captured.valueOf() + 3200);
-  await ingest(db, sample(0, captured), captured, config);
-  await ingest(db, sample(1, dark), dark, config);
+  const captured = Date.now() - 20_000;
+  async function push(sequence, offset, raw) {
+    const time = new Date(captured + offset);
+    const snapshot = sample(sequence, time);
+    snapshot.buildings.office.sensors.light.raw = raw;
+    await ingest(db, snapshot, time, config);
+  }
+  await push(0, 0, 280);
+  await push(1, 3200, 990);
+  assert.equal((await state(db, demoOwner, false)).incidents.length, 0);
+  await push(2, 6400, 1023);
+  await push(3, 9600, 990);
+  assert.equal((await state(db, demoOwner, false)).incidents.length, 0);
+  await push(4, 12800, 990);
   await worker.tick();
   let [incident] = (await state(db, demoOwner, false)).incidents;
   const originalRequest = incident.request_id;
-  assert.match(incident.owner_question, /covering/);
+  assert.match(incident.owner_question, /extra light source/);
   await worker.tick();
   assert.match(messages.at(-1).body, /Reply ANSWER/);
-  assert.equal(await webhook(`ANSWER REQ-${originalRequest} No obstruction.`), 204);
+  assert.equal(await webhook(`ANSWER REQ-${originalRequest} Yes, an extra lamp.`), 204);
   worker = createIntegrationWorker(db, config, clients);
   await worker.tick();
   [incident] = (await state(db, demoOwner, false)).incidents;
@@ -122,6 +133,7 @@ test('shared Photon iMessage replies survive worker restart and use the existing
   const technicianMessages = () => messages.filter(({ recipient }) => recipient === technicianPhone);
   assert.equal(technicianMessages().length, 1);
   assert.ok(technicianMessages()[0].body.includes(`ACCEPT WO-${incident.work_id}`));
+  assert.match(technicianMessages()[0].body, /sustained bright light/);
 
   const accept = `ACCEPT WO-${incident.work_id}`;
   assert.equal(await webhook(accept, { messageId: 'wrong-sender' }), 204);
@@ -130,14 +142,18 @@ test('shared Photon iMessage replies survive worker restart and use the existing
   assert.equal(await webhook(`REPORT WO-${incident.work_id} Reconnected the lighting wire.`, { sender: technicianPhone }), 204);
   assert.equal((await state(db, demoOwner, false)).incidents[0].status, 'awaiting_verification');
   const recovery = new Date(Date.now() - 3450);
-  await ingest(db, sample(2, recovery, { dark: false }), recovery, config);
+  const normal = sample(5, recovery, { dark: false });
+  normal.buildings.office.sensors.light.raw = 891;
+  await ingest(db, normal, recovery, config);
   const confirmed = new Date(recovery.valueOf() + 3200);
-  await ingest(db, sample(3, confirmed, { dark: false }), confirmed, config);
+  const stillNormal = sample(6, confirmed, { dark: false });
+  stillNormal.buildings.office.sensors.light.raw = 891;
+  await ingest(db, stillNormal, confirmed, config);
   await advanceWork(db, demoOwner, incident.work_id, 'verify', { method: 'sensor' }, false, config);
   assert.equal((await state(db, demoOwner, false)).incidents[0].status, 'resolved');
 
   const now = new Date();
-  await ingest(db, sample(4, now, { dark: false, ir: true }), now, { ...config, investigate: false });
+  await ingest(db, sample(7, now, { dark: false, ir: true }), now, { ...config, investigate: false });
   const ir = (await state(db, demoOwner, false)).incidents.find(({ kind }) => kind === 'ir_alert');
   while (await worker.tick()) { /* Deliver owner updates and the data-center request. */ }
   assert.ok(messages.at(-1).body.includes(`DECLINE REQ-${ir.request_id}`));

@@ -22,31 +22,37 @@ test('office learns stable live light once, ignores short shadows, and queues on
   t.after(() => db.close());
   await db.query("insert into bc.memberships values ($1,'office')", [demoOwner]);
   const integrations = { monitorIr: false, contacts: { office: {} } };
-  const start = Date.now() - 35_000;
-  const push = (second, dark, source = 'hardware') => {
+  const start = Date.now() - 90_000;
+  const push = (second, dark, source = 'hardware', clipped = false) => {
     const captured = start + second * 1000;
-    return ingest(db, { ...sample(second, captured, { dark, ir: true }), source }, new Date(captured), integrations);
+    const snapshot = { ...sample(second, captured, { dark, ir: true }), source };
+    if (clipped) snapshot.buildings.office.sensors.light.raw = 1023;
+    return ingest(db, snapshot, new Date(captured + 4200), integrations);
   };
   const office = async () => (await state(db, demoOwner, false)).buildings[0];
   for (let second = 0; second <= 15; second++) await push(second, false, 'simulated');
   assert.equal((await office()).light_min_ratio, null);
-  for (let second = 16; second <= 30; second++) await push(second, false);
+  for (const second of [18, 24, 30, 36]) await push(second, false, 'hardware', true);
   assert.equal((await office()).light_baseline_ratio, null);
-  await push(31, false);
+  for (const second of [42, 48, 54]) await push(second, false);
+  assert.equal((await office()).light_baseline_ratio, null);
+  await push(60, false);
   const learned = await office();
   assert.ok(Number(learned.light_baseline_ratio) > 0.72);
   assert.ok(Number(learned.light_min_ratio) < 0.5);
 
-  await push(32, true);
-  await push(33, true);
-  await push(34, false);
+  await push(61, true);
+  await push(62, true);
+  await push(63, false);
   assert.equal((await db.query("select id from bc.incidents where source='hardware'")).rows.length, 0);
-  for (let second = 35; second <= 45; second++) await push(second, true);
+  for (const second of [69, 75, 81]) await push(second, true);
   const { incidents } = await state(db, demoOwner, false);
   assert.equal(incidents.length, 1);
   assert.equal(incidents[0].kind, 'low_light');
   assert.equal((await office()).light_baseline_ratio, learned.light_baseline_ratio);
   assert.equal((await db.query("select id from bc.integration_jobs where kind='owner_approval'")).rows.length, 1);
+  await push(87, false, 'hardware', true);
+  assert.equal((await db.query("select light_recovered_since from bc.devices where id='unoq-main'")).rows[0].light_recovered_since, null);
   await assert.rejects(relearnOfficeLight(db, demoOwner), { status: 409 });
 });
 

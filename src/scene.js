@@ -270,6 +270,7 @@ export function createScene(canvas, labelLayer, opts = {}) {
   };
   const homePose = () => {
     const k = clamp(1.8 / aspect(), 1.1, 2.6) * (interactive ? 1 : 1.2);
+    if (!interactive) return { pos: new THREE.Vector3(0, 6 * k, 29 * k), target: new THREE.Vector3(0, 1, 0) };
     return { pos: new THREE.Vector3(0, 12 * k, 23 * k), target: new THREE.Vector3(0, 1.5, 0) };
   };
   function outsideLimits() {
@@ -281,14 +282,31 @@ export function createScene(canvas, labelLayer, opts = {}) {
     controls.minPolarAngle = 0.2; controls.maxPolarAngle = Math.PI * 0.55;
   }
   outsideLimits();
+  // Both the landing dive and the world intro meet at this pose, between the two buildings.
+  const DIVE = { pos: new THREE.Vector3(0, 2.6, 10), target: new THREE.Vector3(0, 2, -6) };
+  let viewX = 0;
+  let viewY = 0;
+  const viewGoal = () => {
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if (!interactive) return { x: 0, y: -h * 0.24 };
+    return w > 760 ? { x: 210, y: 0 } : { x: 0, y: 0 };
+  };
+  const applyView = () => {
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if (!w || !h) return;
+    if (viewX || viewY) camera.setViewOffset(w, h, viewX, viewY, w, h); else camera.clearViewOffset();
+    camera.updateProjectionMatrix();
+  };
   const home = homePose();
-  camera.position.copy(home.pos);
-  controls.target.copy(home.target);
+  camera.position.copy(interactive && opts.intro ? DIVE.pos : home.pos);
+  controls.target.copy(interactive && opts.intro ? DIVE.target : home.target);
   if (!interactive) { controls.enabled = false; controls.autoRotate = true; controls.autoRotateSpeed = 0.7; }
 
-  function flyTo(pos, target, duration, shells, done, fov = 45) {
+  function flyTo(pos, target, duration, shells, done, fov = 45, view = null) {
     controls.enabled = false;
-    tween = { t: 0, duration, p0: camera.position.clone(), t0: controls.target.clone(), p1: pos, t1: target, shells, done, fov0: camera.fov, fov1: fov };
+    tween = { t: 0, duration, p0: camera.position.clone(), t0: controls.target.clone(), p1: pos, t1: target, shells, done, fov0: camera.fov, fov1: fov, view0: { x: viewX, y: viewY }, view1: view };
   }
   const setOutsideVisuals = (id, visible) => {
     const b = buildings[id];
@@ -376,12 +394,17 @@ export function createScene(canvas, labelLayer, opts = {}) {
     if (!w || !h) return;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
-    if (w > 760) camera.setViewOffset(w, h, interactive ? 210 : -w * 0.2, 0, w, h); else camera.clearViewOffset();
-    camera.updateProjectionMatrix();
+    if (!tween) { const goal = viewGoal(); viewX = goal.x; viewY = goal.y; }
+    applyView();
   }
   const observer = new ResizeObserver(resize);
   observer.observe(canvas);
   resize();
+  if (interactive && opts.intro) {
+    viewX = 0; viewY = 0; applyView();
+    const pose = homePose();
+    flyTo(pose.pos, pose.target, 2.4, [], () => { controls.enabled = true; }, 45, viewGoal());
+  }
 
   const tmp = new THREE.Vector3();
   const tint = new THREE.Color();
@@ -413,11 +436,12 @@ export function createScene(canvas, labelLayer, opts = {}) {
       camera.position.lerpVectors(tween.p0, tween.p1, k);
       controls.target.lerpVectors(tween.t0, tween.t1, k);
       camera.fov = lerp(tween.fov0, tween.fov1, k);
-      camera.updateProjectionMatrix();
+      if (tween.view1) { viewX = lerp(tween.view0.x, tween.view1.x, k); viewY = lerp(tween.view0.y, tween.view1.y, k); }
+      applyView();
       tween.shells.forEach(([material, from, to]) => { material.opacity = lerp(from, to, k); });
       if (tween.t >= tween.duration) { const done = tween.done; tween = null; done?.(); }
     }
-    controls.update();
+    if (!tween) controls.update();
     if (inside && !tween) {
       const s = SITES[inside];
       camera.position.set(clamp(camera.position.x, s.x - s.w / 2 + 0.6, s.x + s.w / 2 - 0.6), clamp(camera.position.y, 0.7, s.h - 0.3),
@@ -466,6 +490,11 @@ export function createScene(canvas, labelLayer, opts = {}) {
     },
     select(key) { setSelected(key, false); },
     enter, exit,
+    dive(done) {
+      if (interactive || tween) return;
+      controls.autoRotate = false;
+      flyTo(DIVE.pos, DIVE.target, 1.7, [], done, 45, { x: 0, y: 0 });
+    },
     dispose() {
       renderer.setAnimationLoop(null);
       observer.disconnect();

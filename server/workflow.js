@@ -1,7 +1,8 @@
 import { enqueue } from './jobs.js';
-import { calibrationMs, learnOfficeBaseline, lightThreshold, officeLightTiming, staleMs, sustainMs } from '../shared/office-light.js';
+import { calibrationMs, learnOfficeBaseline, lightThreshold, lightUpperThreshold, officeLightTiming, officeSampleGapMs, staleMs, sustainMs } from '../shared/office-light.js';
 
 export { staleMs };
+const maxUploadAgeMs = 5000;
 
 export function requireCondition(condition, status, message) {
   if (!condition) throw Object.assign(new Error(message), { status });
@@ -17,14 +18,15 @@ export async function activity(tx, building, incident, kind, message) {
 }
 
 async function calibrateOffice(tx, snapshot, office, captured) {
-  if (snapshot.source !== 'hardware' || snapshot.sequence < 7) return null;
+  if (snapshot.source !== 'hardware' || snapshot.sequence < 3) return null;
   const { rows } = await tx.query(`
     select captured_at, payload->'buildings'->'office' as reading
     from bc.telemetry where device_id=$1 and boot_id=$2 and payload->>'source'='hardware'
-      and captured_at between $3 and $4 and received_at-captured_at < interval '5 seconds'
+      and captured_at between $3 and $4 and received_at-captured_at < $5::int * interval '1 millisecond'
     order by captured_at desc limit 40`,
   [snapshot.device_id, snapshot.boot_id,
-    new Date(Math.max(captured.valueOf() - calibrationMs - 5000, Number(new Date(office.light_calibration_after)))), captured]);
+    new Date(Math.max(captured.valueOf() - calibrationMs - officeSampleGapMs, Number(new Date(office.light_calibration_after)))),
+    captured, maxUploadAgeMs]);
   // A recent unstable sample should restart the learning window.
   const samples = rows.reverse();
   const lastBeforeWindow = samples.findLastIndex(({ captured_at }) => captured - new Date(captured_at) >= calibrationMs);
@@ -62,9 +64,11 @@ async function detect(tx, building, kind, snapshot, evidence, integrations) {
   const { id } = await one(tx, `
     insert into bc.incidents (building_id, kind, source, evidence, last_seen_at)
     values ($1,$2,$3,$4,$5) returning id`, [building, kind, snapshot.source, evidence, snapshot.captured_at]);
-  await activity(tx, building, id, 'detected', kind === 'low_light' ? 'Unexpected low lighting detected' : 'IR sensor activation detected');
+  const bright = evidence.direction === 'high';
+  const label = bright ? 'Unexpected bright lighting' : 'Unexpected low lighting';
+  await activity(tx, building, id, 'detected', kind === 'low_light' ? `${label} detected` : 'IR sensor activation detected');
   const recommendation = kind === 'low_light'
-    ? 'Inspect the office lighting circuit and confirm why illumination is below its calibrated range.'
+    ? `Inspect the office lighting and sensor to find why illumination is ${bright ? 'above' : 'below'} its calibrated range.`
     : 'Inspect the area and sensor to determine what triggered the IR signal.';
   const request = await one(tx, 'insert into bc.service_requests (incident_id, version, recommendation) values ($1,1,$2) returning id',
     [id, recommendation]);
@@ -90,21 +94,24 @@ export async function ingest(db, snapshot, now = new Date(), integrations = {}) 
     [snapshot.device_id, snapshot.boot_id, snapshot.sequence, captured, now, snapshot]);
     if (!inserted) return { duplicate: true, current: false };
     const lastCaptured = device.captured_at && new Date(device.captured_at);
-    if (now - captured >= staleMs || (lastCaptured && captured <= lastCaptured) ||
+    if (now - captured >= maxUploadAgeMs || (lastCaptured && captured <= lastCaptured) ||
         (device.latest?.boot_id === snapshot.boot_id && snapshot.sequence <= device.latest.sequence)) {
       return { duplicate: false, current: false };
     }
 
-    const office = await one(tx, "select light_min_ratio,light_calibration_after,lights_expected_on from bc.buildings where id='office'");
+    const office = await one(tx, "select light_baseline_ratio,light_min_ratio,light_calibration_after,lights_expected_on from bc.buildings where id='office'");
     const light = snapshot.buildings.office.sensors.light;
     const lightsOn = snapshot.buildings.office.commanded.leds.some(Boolean);
     let threshold = null;
-    if (office.lights_expected_on && lightsOn) {
+    if (office.lights_expected_on && lightsOn && light.raw < light.adc_max) {
       threshold = office.light_min_ratio === null ? await calibrateOffice(tx, snapshot, office, captured) : Number(office.light_min_ratio);
     }
-    const continuous = lastCaptured && captured - lastCaptured < staleMs && device.latest.boot_id === snapshot.boot_id;
+    const upperThreshold = lightUpperThreshold(office.light_baseline_ratio, light.adc_max);
+    const previousLight = device.latest?.buildings.office.sensors.light;
+    const continuous = lastCaptured && captured - lastCaptured < officeSampleGapMs && device.latest.boot_id === snapshot.boot_id;
     const timing = officeLightTiming({
-      ratio: light.raw / light.adc_max, threshold, captured: captured.valueOf(), continuous, previous: device,
+      ratio: light.raw / light.adc_max, threshold, upperThreshold, captured: captured.valueOf(), continuous, previous: device,
+      previousRatio: previousLight ? previousLight.raw / previousLight.adc_max : null,
     });
     const darkSince = timing.dark_since == null ? null : new Date(timing.dark_since);
     const recoveredSince = timing.light_recovered_since == null ? null : new Date(timing.light_recovered_since);
@@ -117,7 +124,11 @@ export async function ingest(db, snapshot, now = new Date(), integrations = {}) 
       }
     }
     if (timing.alert) {
-      await detect(tx, 'office', 'low_light', snapshot, { ...light, min_ratio: threshold, captured_at: snapshot.captured_at }, integrations);
+      // Keep the existing incident kind so both directions share the same open incident and repair workflow.
+      await detect(tx, 'office', 'low_light', snapshot, {
+        ...light, direction: timing.direction, baseline_ratio: office.light_baseline_ratio,
+        min_ratio: threshold, max_ratio: upperThreshold, captured_at: snapshot.captured_at,
+      }, integrations);
     }
     const ir = snapshot.buildings.data_center.sensors.flame_ir;
     if ((snapshot.source === 'simulated' || integrations.monitorIr !== false) && (ir.ir_alert || ir.alert_seen_since_last_report)) {

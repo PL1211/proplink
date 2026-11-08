@@ -50,12 +50,12 @@ Open `/api/photon/webhook` in a browser to check whether the deployed API has Ph
 
 ### Hardware and live rehearsal
 
-Choose **Test office light** in the dashboard to replay a cover, brief shadow, or recovery without the Arduino. The simulation uses the live timing rule and leaves real incidents and messages alone.
+Choose **Test office light** in the dashboard to replay a cover, bright light, brief shadow, or recovery without the Arduino. The simulation uses the live timing rule and leaves real incidents and messages alone.
 
-For the live demo, leave the office sensor uncovered with the LEDs on. proplink learns a baseline from at least 15 seconds of stable fresh samples and alerts below 65% of that baseline. The baseline stays fixed through changes and restarts. Use **Relearn baseline** in the test panel to start over with the sensor uncovered.
+For the live demo, leave the office sensor uncovered with the LEDs on. proplink learns a baseline from at least 15 seconds of stable readings and alerts when light stays below 65% or above 110% of that baseline for at least three seconds. A reading at the ADC ceiling is flagged as saturated. The upper alert requires enough sensor range to measure above 110% of baseline. Use **Relearn baseline** in the test panel to start over with the sensor uncovered.
 
-1. Stop the uploader. Both buildings should become stale after five seconds. Restart it and verify both are fresh. Data center IR is shown for reference by default. To enable its alerts after verifying the hardware, set `MONITOR_DATA_CENTER_IR=true` on the API.
-2. Shade the office sensor for more than three seconds. Verify one incident, a Nemotron assessment, and the approval message. Reply with the exact `APPROVE REQ-…` command from the message. Confirm the technician receives one iMessage with the work order and that the dashboard records the contact.
+1. Stop the uploader. Both buildings should become stale after 15 seconds. Restart it and verify both are fresh. Data center IR is shown for reference by default. To enable its alerts after verifying the hardware, set `MONITOR_DATA_CENTER_IR=true` on the API.
+2. Shade the office sensor until at least two low readings are visible, about 15 seconds with the current uploader. Verify one incident, a Nemotron assessment, and the approval message. Reply with the exact `APPROVE REQ-…` command from the message. Confirm the technician receives one iMessage with the work order and that the dashboard records the contact.
 3. From the technician's configured number, send `ACCEPT WO-…`, then `REPORT WO-…` followed by the findings. Restore normal light and verify with fresh recovered readings.
 4. Repeat with a new incident and `DECLINE REQ-…`. The incident stays open and no technician action is queued. Replay an already handled reply in the test environment and confirm no additional work order or send is created.
 

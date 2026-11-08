@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createClient } from '@supabase/supabase-js';
-import { lightThreshold, officeLightTiming } from '../shared/office-light.js';
+import { lightThreshold, lightUpperThreshold, officeLightTiming } from '../shared/office-light.js';
 import {
   Activity, AlertTriangle, ArrowRight, Building2, Check, CheckCircle2, ChevronRight, CircleDot, ClipboardCheck,
   ArrowLeft, Box, Clock3, FlaskConical, LayoutGrid, LogOut, MousePointerClick, Radio, RefreshCw, Server, Settings, Settings2, Wrench, X,
@@ -24,7 +24,9 @@ const temperatureNote = (sensor) => ({ room_estimate: 'Estimated from room refer
 const flame = (sensor) => !sensor ? 'Awaiting reading' : sensor.ir_alert ? 'Signal active' :
   sensor.alert_seen_since_last_report ? 'Brief activation' : 'Clear';
 const fan = (reading) => !reading ? 'Awaiting status' : reading.commanded.fan === 'running' ? 'Running' : 'Stopped';
-const issueOf = (incident) => incident.kind === 'low_light' ? 'Unexpected low lighting' : 'IR sensor activation';
+const issueOf = ({ kind, evidence }) => kind === 'low_light'
+  ? evidence?.direction === 'high' ? 'Unexpected bright lighting' : 'Unexpected low lighting'
+  : 'IR sensor activation';
 const statusText = { queued: 'Contact queued', contacted: 'Contact recorded', accepted: 'Visit accepted', declined: 'Technician declined', repair_reported: 'Awaiting verification', verified: 'Repair verified' };
 
 async function api(path, token, body, signal) {
@@ -85,6 +87,17 @@ function Metric({ label, value, detail, icon: Icon, tone }) {
     <strong>{value}</strong><small>{detail}</small></div>;
 }
 
+function officeLightDetail(building, light) {
+  if (light && light.raw === light.adc_max) return 'Sensor at maximum · Check lighting or A0 wiring';
+  if (building.light_min_ratio == null) return 'Waiting for a stable light baseline';
+  const baseline = Number(building.light_baseline_ratio);
+  if (!baseline) return `Alert below ${percent(building.light_min_ratio)} of sensor range`;
+  const lower = percent(building.light_min_ratio / baseline);
+  const upper = lightUpperThreshold(baseline, light?.adc_max ?? 1023);
+  const level = light ? `${percent(light.raw / light.adc_max / baseline)} of baseline · ` : '';
+  return `${level}Alert below ${lower}${upper == null ? ' · Upper limit outside sensor range' : ` or above ${percent(upper / baseline)}`}`;
+}
+
 function BuildingReadings({ building }) {
   const { reading } = building;
   const office = building.id === 'office';
@@ -92,8 +105,7 @@ function BuildingReadings({ building }) {
   const temperature = sensors?.thermistor;
   return <dl className="building-readings">
     <div><dt>{office ? 'Ambient light' : 'Flame sensor'}</dt><dd>{office ? adc(sensors?.light) : flame(sensors?.flame_ir)}
-      {office && <small>{building.light_min_ratio == null ? 'Waiting for a stable light baseline' :
-        `${building.light_baseline_ratio == null ? '' : 'Baseline ' + percent(building.light_baseline_ratio) + ' · '}Alert below ${percent(building.light_min_ratio)}`}</small>}
+      {office && <small>{officeLightDetail(building, sensors?.light)}</small>}
       {!office && building.ir_alerts_enabled === false && <small>Reference reading · Alerts disabled</small>}</dd></div>
     <div><dt>Temperature sensor</dt><dd>{temperatureText(temperature)}{temperature && <small>{temperatureNote(temperature)} · {temperature.hot ? 'Heat flag active' : 'Heat flag inactive'}</small>}</dd></div>
     <div><dt>Fan</dt><dd>{fan(reading)}{reading && <small>Controller reported · Speed unavailable</small>}</dd></div>
@@ -131,7 +143,7 @@ function IncidentCard({ incident, demo, decide, work, answer, busy }) {
         <div className="eyebrow">{nameOf(incident.building_id)} <span>·</span> {incident.source === 'simulated' ? 'SIMULATED INCIDENT' : 'HARDWARE INCIDENT'}</div>
         <h3>{issueOf(incident)}</h3>
       </div></div><Badge tone={approval[0]}>{approval[1]}</Badge></div>
-    <p>{light ? `Observed ${evidence.raw} ADC counts with lighting expected on. The lighting circuit needs inspection to confirm the cause.` :
+    <p>{light ? `Observed ${evidence.raw} ADC counts${evidence.baseline_ratio ? ` (${percent(evidence.raw / evidence.adc_max / evidence.baseline_ratio)} of baseline)` : ''} with lighting expected on.` :
       'The IR input registered an activation. An inspection can help determine what triggered the signal.'}</p>
     <div className="recommendation"><ClipboardCheck size={17} /><div><strong>Recommended next step</strong><p>{incident.recommendation}</p></div></div>
     <div className="incident-actions">
@@ -279,6 +291,7 @@ function DemoControls({ close, run, busy, error }) {
 
 const lightScenarios = {
   covered: { label: 'Cover sensor', samples: ['normal', 'low', 'low', 'low', 'low'] },
+  bright: { label: 'Shine extra light', samples: ['normal', 'high', 'high', 'high', 'high'] },
   shadow: { label: 'Brief shadow', samples: ['normal', 'low', 'low', 'normal', 'normal'] },
   recovery: { label: 'Uncover sensor', samples: ['low', 'low', 'low', 'low', 'normal', 'normal', 'normal', 'normal'] },
 };
@@ -286,22 +299,28 @@ const lightScenarios = {
 function OfficeLightTest({ office, demo, close, relearn, busy, error }) {
   const [scenario, setScenario] = useState('covered');
   const [confirmRelearn, setConfirmRelearn] = useState(false);
-  const baseline = Number(office?.light_baseline_ratio ?? 0.68);
-  const threshold = Number(office?.light_min_ratio ?? lightThreshold(baseline));
-  const normal = Math.max(baseline, threshold);
+  const adcMax = office?.reading?.sensors?.light?.adc_max ?? 1023;
+  const liveBaseline = office?.light_baseline_ratio;
+  const useExample = liveBaseline == null || (scenario === 'bright' && lightUpperThreshold(liveBaseline, adcMax) == null);
+  const baseline = useExample ? 0.68 : Number(liveBaseline);
+  const threshold = useExample ? lightThreshold(baseline) : Number(office.light_min_ratio);
+  const upperThreshold = lightUpperThreshold(baseline, adcMax);
   let timing = {};
+  let previousRatio;
   let alerted = false;
   let recovered = false;
   const samples = lightScenarios[scenario].samples.map((level, seconds) => {
-    const ratio = level === 'low' ? threshold * 0.48 : normal;
-    timing = officeLightTiming({ ratio, threshold, captured: seconds * 1000, continuous: seconds > 0, previous: timing });
+    const ratio = level === 'low' ? threshold * 0.48 : level === 'high' ? (adcMax - 1) / adcMax : baseline;
+    timing = officeLightTiming({ ratio, threshold, upperThreshold, captured: seconds * 1000,
+      continuous: seconds > 0, previous: timing, previousRatio });
+    previousRatio = ratio;
     const event = timing.alert && !alerted ? 'Alert opens' : timing.recovered && alerted && !recovered ? 'Light recovered' : '';
     alerted ||= timing.alert;
     recovered ||= alerted && timing.recovered;
     return { ratio, seconds, event };
   });
   const result = recovered ? 'Light recovered. In a live incident, the owner can verify the repair after the technician reports it.' :
-    alerted ? 'Low light lasted 3 seconds. In a live incident, proplink asks the owner to approve a visit before messaging the technician.' :
+    alerted ? `${scenario === 'bright' ? 'Bright' : 'Low'} light lasted 3 seconds. In a live incident, proplink asks the owner to approve a visit before messaging the technician.` :
       'The shadow cleared before 3 seconds, so no incident opens.';
 
   return <Modal title="Test office light" close={close}>
@@ -309,11 +328,12 @@ function OfficeLightTest({ office, demo, close, relearn, busy, error }) {
     <div className="row wrap">{Object.entries(lightScenarios).map(([id, option]) =>
       <button key={id} type="button" className={'button ' + (id === scenario ? 'primary' : 'secondary')}
         aria-pressed={id === scenario} onClick={() => setScenario(id)}>{option.label}</button>)}</div>
-    <p><strong>{office?.light_min_ratio == null ? 'Example threshold' : 'Office threshold'}</strong> · {percent(threshold)}</p>
+    <p><strong>{useExample ? 'Example thresholds' : 'Office thresholds'}</strong> · Below {percent(threshold / baseline)}{upperThreshold != null && ` or above ${percent(upperThreshold / baseline)}`} of baseline</p>
+    {liveBaseline != null && lightUpperThreshold(liveBaseline, adcMax) == null && <p>The live upper threshold is outside the sensor’s measurable range.</p>}
     <div className="light-test-samples" aria-label="Simulated light samples">
       {samples.map(({ ratio, seconds, event }) => <div className="light-test-sample" key={seconds}>
         <span>{seconds}s</span><progress value={ratio} max={1} aria-label={`Light at ${seconds} seconds`} />
-        <strong>{percent(ratio)}</strong>{event && <small>{event}</small>}
+        <strong>{percent(ratio / baseline)}</strong>{event && <small>{event}</small>}
       </div>)}
     </div>
     <p role="status">{result}</p>
@@ -347,6 +367,7 @@ function useEngine(options) {
       try {
         instance = createScene(canvasRef.current, labelsRef.current, {
           interactive: latest.current.interactive,
+          intro: latest.current.intro,
           onSelect: (key) => latest.current.onSelect?.(key),
           onEnter: (id) => latest.current.onEnter?.(id),
         });
@@ -359,21 +380,25 @@ function useEngine(options) {
   return { canvasRef, labelsRef, engine, status };
 }
 
-function Landing({ client, demo, onEnter }) {
+function Landing({ client, demo, leaving, onEnter, onDone }) {
   const [form, setForm] = useState(false);
-  const { canvasRef, labelsRef } = useEngine({ interactive: false });
-  return <div className="landing">
+  const { canvasRef, labelsRef, engine, status } = useEngine({ interactive: false });
+  useEffect(() => {
+    if (!leaving || status === 'loading') return undefined;
+    if (engine.current) engine.current.dive(onDone);
+    const fallback = setTimeout(onDone, engine.current ? 4000 : 0);
+    return () => clearTimeout(fallback);
+  }, [leaving, status]); // eslint-disable-line react-hooks/exhaustive-deps
+  return <div className={'landing' + (leaving ? ' leaving' : '')}>
     <canvas ref={canvasRef} className="world-canvas" aria-hidden="true" /><div ref={labelsRef} className="hotspots" />
     <div className="landing-shade" />
-    <div className="landing-content"><Brand dark />
-      <div className="landing-copy">
-        <div className="eyebrow">OFFICE · DATA CENTER</div>
-        <h1>Walk through your buildings.</h1>
-        <p>Monitor conditions, review incidents, and approve technician visits for the office and the data center.</p>
-        {form ? <div className="signin-card glass"><SignIn client={client} /><button className="text-button" onClick={() => setForm(false)}>Back</button></div> :
-          <button className="button primary large" onClick={() => (demo ? onEnter() : setForm(true))}>Sign in <ArrowRight size={17} /></button>}
-      </div>
-    </div>
+    <main className="landing-content">
+      <h1 className="wordmark">prop<em>link</em></h1>
+      <div className="rule" aria-hidden="true"><span /><i /><span /></div>
+      <p className="tagline">office &amp; data center</p>
+      {form ? <div className="signin-card glass"><SignIn client={client} /><button className="text-button" onClick={() => setForm(false)}>Back</button></div> :
+        <button className="enter" onClick={() => (demo ? onEnter() : setForm(true))}>Sign in</button>}
+    </main>
   </div>;
 }
 
@@ -418,10 +443,10 @@ function SensorHistory({ buildingId, token, office }) {
     <ReadingsChart samples={history.samples} office={office} /></>;
 }
 
-function World({ data, demo, busy, token, status, notices, settings, decide, work, answer, lightTest }) {
+function World({ data, demo, busy, token, status, notices, settings, decide, work, answer, lightTest, intro }) {
   const [site, setSite] = useState(null);
   const [sel, setSel] = useState(null);
-  const { canvasRef, labelsRef, engine, status: gl } = useEngine({ onSelect: setSel, onEnter: (id) => { setSite(id); setSel(null); } });
+  const { canvasRef, labelsRef, engine, status: gl } = useEngine({ intro, onSelect: setSel, onEnter: (id) => { setSite(id); setSel(null); } });
   const buildings = data?.buildings ?? [];
   const incidents = data?.incidents ?? [];
   const open = incidents.filter((incident) => incident.status !== 'resolved');
@@ -460,7 +485,7 @@ function World({ data, demo, busy, token, status, notices, settings, decide, wor
         {building.reading && <small>{building.connection === 'stale' ? 'Last controller report' : 'Controller reported'}{isFan && ' · Speed unavailable'}</small>}</div>;
     }
   }
-  return <div className="world">
+  return <div className={'world' + (intro ? ' intro' : '')}>
     <canvas ref={canvasRef} className="world-canvas" aria-label="Interactive 3D view of the office and data center" /><div ref={labelsRef} className="hotspots" />
     <header className="world-top"><Brand dark /><div className="row">{status}{lightTest}{settings}</div></header>
     <div className="world-notices">{notices}</div>
@@ -490,7 +515,7 @@ function World({ data, demo, busy, token, status, notices, settings, decide, wor
   </div>;
 }
 
-function Dashboard({ session, client, demo }) {
+function Dashboard({ session, client, demo, intro }) {
   const token = session?.access_token;
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState('');
@@ -572,7 +597,7 @@ function Dashboard({ session, client, demo }) {
   const settingsMenu = <SettingsMenu view={view} setView={changeView} client={client} demo={demo} email={session?.user?.email}
     openControls={() => { setActionError(''); setControls(true); }} />;
   if (view === '3d') return <div className="world-shell">
-    <World data={data} demo={demo} busy={busy} token={token} status={statusBadge} notices={notices} settings={settingsMenu} lightTest={lightTest}
+    <World intro={intro} data={data} demo={demo} busy={busy} token={token} status={statusBadge} notices={notices} settings={settingsMenu} lightTest={lightTest}
       decide={(item, decision) => { setActionError(''); setConfirm({ item, decision }); }}
       work={(item, body) => run('/work-orders/' + item.work_id + '/progress', body)} answer={answer} />
     {modals}
@@ -634,7 +659,8 @@ function App() {
   const [client, setClient] = useState(null);
   const [session, setSession] = useState(undefined);
   const [error, setError] = useState('');
-  const [entered, setEntered] = useState(false);
+  const [gate, setGate] = useState(null);
+  const intro = useRef(false);
   useEffect(() => {
     const controller = new AbortController();
     let subscription;
@@ -649,12 +675,18 @@ function App() {
     }).catch((error) => { if (!controller.signal.aborted) setError(error.message); });
     return () => { controller.abort(); subscription?.unsubscribe(); };
   }, []);
-  if (!config || (!config.demo && session === undefined)) return <div className="signin"><div className="signin-panel">
+  useEffect(() => {
+    if (!config) return;
+    if (gate === null && (config.demo || session !== undefined)) setGate(config.demo || !session ? 'landing' : 'open');
+    else if (gate === 'landing' && !config.demo && session) { intro.current = true; setGate('leaving'); }
+    else if (gate === 'open' && !config.demo && !session) setGate('landing');
+  }, [config, session, gate]);
+  if (!config || (!config.demo && session === undefined) || gate === null) return <div className="signin"><div className="signin-panel">
     <Brand /><p role={error ? 'alert' : 'status'}>{error || 'Loading proplink…'}</p>
     {error && <button className="button secondary" onClick={() => location.reload()}>Try again</button>}</div></div>;
-  if (!config.demo && !session) return <Landing client={client} />;
-  if (config.demo && !entered) return <Landing demo onEnter={() => setEntered(true)} />;
-  return <Dashboard key={session?.user?.id ?? 'demo'} demo={config.demo} client={client} session={session} />;
+  if (gate !== 'open' || (!config.demo && !session)) return <Landing client={client} demo={config.demo} leaving={gate === 'leaving'}
+    onEnter={() => { intro.current = true; setGate('leaving'); }} onDone={() => setGate('open')} />;
+  return <Dashboard key={session?.user?.id ?? 'demo'} demo={config.demo} client={client} session={session} intro={intro.current} />;
 }
 
 createRoot(document.getElementById('root')).render(<App />);

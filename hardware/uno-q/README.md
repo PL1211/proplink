@@ -46,6 +46,8 @@ The office sends ambient light, thermistor counts, and fan status. The data cent
 
 The sketch keeps the supplied pin assignments, always-on LEDs, and servo behavior. Fan status reflects the controller's request to move the servo. Fan speed and actual movement are not measured. The dashboard only monitors the hardware.
 
+If office light sits at **1023**, cover the Grove sensor itself with something opaque and compare the Arduino Monitor reading. If it drops, move the sensor away from direct LED light until the uncovered reading is also below 1023. If it stays at 1023, power off and check that the Grove signal goes to A0, ground is shared, and the Grove module uses the 3.3 V supply. The UNO Q analog inputs are referenced to 3.3 V. [UNO Q user manual](https://docs.arduino.cc/tutorials/uno-q/user-manual/?queryID=bbb993e8bdbcff412df9e47ab674ffd1) · [Grove light sensor](https://wiki.seeedstudio.com/Grove-Light_Sensor/)
+
 ## Calibrate the KY-028 temperature sensors
 
 1. Put a reference thermometer next to each module. Let the reading settle, then record the thermometer's temperature and the average `temp=` count from the Serial Monitor for each building. `temp=` is a raw count; `base=` is the startup count.
