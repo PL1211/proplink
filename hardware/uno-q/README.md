@@ -1,4 +1,4 @@
-# Connect the UNO Q to BuildingConnect
+# Connect the UNO Q to proplink
 
 ## Join Wi-Fi
 
@@ -15,9 +15,9 @@ The Wi-Fi device should show `connected`. For a LAN test, join the same network 
 
 ## Give the board a backend address
 
-Use the hosted backend at `https://buildingconnect.vercel.app`. From the UNO Q terminal, run `curl https://buildingconnect.vercel.app/api/config` to verify it can reach the server.
+Use the hosted backend at `https://proplink-ops.vercel.app`. From the UNO Q terminal, run `curl https://proplink-ops.vercel.app/api/config` to verify it can reach the server.
 
-For a local test on a trusted private network, run `ipconfig` in Windows PowerShell and find the IPv4 address of the Wi-Fi adapter. From the BuildingConnect repo, start a second listener using that address. Replace the example IP below with your computer's IP.
+For a local test on a trusted private network, run `ipconfig` in Windows PowerShell and find the IPv4 address of the Wi-Fi adapter. From the proplink repo, start a second listener using that address. Replace the example IP below with your computer's IP.
 
 ```powershell
 npm.cmd run build
@@ -35,7 +35,7 @@ In the UNO Q terminal, run `curl http://192.168.1.25:5175/api/config` using the 
 
    ```json
    {
-     "backend_url": "https://buildingconnect.vercel.app",
+     "backend_url": "https://proplink-ops.vercel.app",
      "device_token": "paste the DEVICE_TOKEN value here"
    }
    ```

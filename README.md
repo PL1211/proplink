@@ -1,6 +1,8 @@
-# BuildingConnect
+# proplink
 
-BuildingConnect is a React dashboard and Express API for monitoring the office and data-center models and tracking maintenance. The local demo uses simulated UNO Q snapshots and a persistent embedded Postgres database. The Supabase mode uses the same SQL schema and workflow with Supabase Postgres and Auth.
+proplink is a React dashboard and Express API for monitoring the office and data-center models and tracking maintenance. The local demo uses simulated UNO Q snapshots and a persistent embedded Postgres database. The Supabase mode uses the same SQL schema and workflow with Supabase Postgres and Auth.
+
+[Open the live dashboard](https://proplink-ops.vercel.app/).
 
 The office dashboard shows ambient light, temperature sensor readings, and fan status. The data center shows flame sensor status, temperature sensor readings, and fan status. The dashboard monitors the equipment; it does not send LED or fan commands.
 
@@ -21,7 +23,7 @@ The demo stores progress in `.data/demo` and binds to loopback. To start another
 
 ## Connect a Supabase development project
 
-1. Apply the migration under `supabase/migrations/` to the intended development database. The migration creates the private `bc` schema and seeds the two buildings and their shared device. The [BuildingConnect Supabase project](https://supabase.com/dashboard/project/epsdkfzwlyxyzjegamxn) already has migration `20261108074434` applied. For a fresh project, use a linked Supabase CLI project to track deployment. [Supabase CLI local development](https://supabase.com/docs/guides/local-development/cli/getting-started)
+1. Apply the migration under `supabase/migrations/` to the intended development database. The migration creates the private `bc` schema and seeds the two buildings and their shared device. The [Supabase project for proplink](https://supabase.com/dashboard/project/epsdkfzwlyxyzjegamxn) already has migration `20261108074434` applied. For a fresh project, use a linked Supabase CLI project to track deployment. [Supabase CLI local development](https://supabase.com/docs/guides/local-development/cli/getting-started)
 2. Create a test owner in Supabase Auth using email and password. Add building memberships using that user's UUID in the SQL Editor. Use a separate account to check the scope of building access.
 
    ```sql
@@ -50,7 +52,7 @@ Open `/api/photon/webhook` in a browser to check whether the deployed API has Ph
 
 Choose **Test office light** in the dashboard to replay a cover, brief shadow, or recovery without the Arduino. The simulation uses the live timing rule and leaves real incidents and messages alone.
 
-For the live demo, leave the office sensor uncovered with the LEDs on. BuildingConnect learns a baseline from at least 15 seconds of stable fresh samples and alerts below 65% of that baseline. The baseline stays fixed through changes and restarts. Use **Relearn baseline** in the test panel to start over with the sensor uncovered.
+For the live demo, leave the office sensor uncovered with the LEDs on. proplink learns a baseline from at least 15 seconds of stable fresh samples and alerts below 65% of that baseline. The baseline stays fixed through changes and restarts. Use **Relearn baseline** in the test panel to start over with the sensor uncovered.
 
 1. Stop the uploader. Both buildings should become stale after five seconds. Restart it and verify both are fresh. Data center IR is shown for reference by default. To enable its alerts after verifying the hardware, set `MONITOR_DATA_CENTER_IR=true` on the API.
 2. Shade the office sensor for more than three seconds. Verify one incident, a Nemotron assessment, and the approval message. Reply with the exact `APPROVE REQ-…` command from the message. Confirm the technician receives one iMessage with the work order and that the dashboard records the contact.

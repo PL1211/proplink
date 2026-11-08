@@ -40,7 +40,7 @@ async function api(path, token, body, signal) {
 }
 
 function Brand({ dark }) {
-  return <div className={'brand' + (dark ? ' on-dark' : '')}><div className="brand-mark"><Building2 size={20} /></div><span>Building<span className="brand-accent">Connect</span><small>OPERATIONS CONSOLE</small></span></div>;
+  return <div className={'brand' + (dark ? ' on-dark' : '')}><div className="brand-mark"><Building2 size={20} /></div><span>prop<span className="brand-accent">link</span><small>OPERATIONS CONSOLE</small></span></div>;
 }
 
 function Badge({ tone = 'neutral', children }) {
@@ -301,7 +301,7 @@ function OfficeLightTest({ office, demo, close, relearn, busy, error }) {
     return { ratio, seconds, event };
   });
   const result = recovered ? 'Light recovered. In a live incident, the owner can verify the repair after the technician reports it.' :
-    alerted ? 'Low light lasted 3 seconds. In a live incident, BuildingConnect asks the owner to approve a visit before messaging the technician.' :
+    alerted ? 'Low light lasted 3 seconds. In a live incident, proplink asks the owner to approve a visit before messaging the technician.' :
       'The shadow cleared before 3 seconds, so no incident opens.';
 
   return <Modal title="Test office light" close={close}>
@@ -319,7 +319,7 @@ function OfficeLightTest({ office, demo, close, relearn, busy, error }) {
     <p role="status">{result}</p>
     {!demo && office && <div className="service">
       <strong>Live office calibration</strong>
-      <p>Leave the sensor uncovered with the LEDs on. BuildingConnect learns the baseline from 15 seconds of stable readings.</p>
+      <p>Leave the sensor uncovered with the LEDs on. proplink learns the baseline from 15 seconds of stable readings.</p>
       {error && <p className="error" role="alert">{error}</p>}
       {office.light_min_ratio != null && <div className="row wrap">
         <button type="button" className="button secondary" disabled={busy} onClick={async () => {
@@ -650,7 +650,7 @@ function App() {
     return () => { controller.abort(); subscription?.unsubscribe(); };
   }, []);
   if (!config || (!config.demo && session === undefined)) return <div className="signin"><div className="signin-panel">
-    <Brand /><p role={error ? 'alert' : 'status'}>{error || 'Loading BuildingConnect…'}</p>
+    <Brand /><p role={error ? 'alert' : 'status'}>{error || 'Loading proplink…'}</p>
     {error && <button className="button secondary" onClick={() => location.reload()}>Try again</button>}</div></div>;
   if (!config.demo && !session) return <Landing client={client} />;
   if (config.demo && !entered) return <Landing demo onEnter={() => setEntered(true)} />;

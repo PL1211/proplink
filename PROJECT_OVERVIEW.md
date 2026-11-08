@@ -1,6 +1,6 @@
-# BuildingConnect project overview
+# proplink project overview
 
-**Status as of November 8, 2026.** BuildingConnect monitors two scale models, an office and a data center, with one Arduino UNO Q. It records sensor evidence, opens maintenance incidents, asks an owner to approve a visit, and tracks work through verification. The dashboard and API are deployed on [Vercel](https://buildingconnect.vercel.app), with Supabase for Postgres and owner sign-in. A hardware upload containing readings from both buildings is in the production database.
+**Status as of November 8, 2026.** proplink monitors two scale models, an office and a data center, with one Arduino UNO Q. It records sensor evidence, opens maintenance incidents, asks an owner to approve a visit, and tracks work through verification. The dashboard and API are deployed on [Vercel](https://proplink-ops.vercel.app/), with Supabase for Postgres and owner sign-in. A hardware upload containing readings from both buildings is in the production database.
 
 | MVP | Current state | Remaining work |
 | --- | --- | --- |
