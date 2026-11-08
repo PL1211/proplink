@@ -10,10 +10,14 @@
     "dev": "node --env-file-if-exists=.env server/index.js --dev",
     "build": "vite build",
     "start": "node --env-file-if-exists=.env server/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "worker": "node --env-file-if-exists=.env server/integration-worker.js",
+    "smoke:openrouter": "node --env-file-if-exists=.env scripts/smoke-openrouter.js"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.15",
+    "@spectrum-ts/core": "12.15.0",
+    "@spectrum-ts/imessage": "12.15.0",
     "@supabase/supabase-js": "2.119.0",
     "express": "5.3.0",
     "lucide-react": "1.70.0",

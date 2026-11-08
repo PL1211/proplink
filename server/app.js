@@ -3,10 +3,12 @@ import express from 'express';
 import { z } from 'zod';
 import { acknowledgment, buildingId, command, decision, deviceId, id, snapshot } from './contracts.js';
 import { demoOwner } from './demo.js';
+import { answerInvestigation } from './nemotron.js';
+import { receivePhoton } from './photon.js';
 import { addTemperature } from './temperature.js';
 import {
   acknowledgeCommand, advanceWork, ingest, pendingCommands, queueCommand, readings,
-  recordDecision, requireCondition, state,
+  recordDecision, relearnOfficeLight, requireCondition, state,
 } from './workflow.js';
 
 const scenario = z.enum(['office-dark', 'office-normal', 'ir-alert', 'ir-clear', 'pause', 'resume']);
@@ -22,7 +24,7 @@ const workUpdate = z.union([
 const digest = (value) => createHash('sha256').update(value).digest();
 const bearer = (req) => req.get('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
 
-export function createApp({ db, auth, publicConfig, deviceToken, simulator, temperatureCalibration = {} }) {
+export function createApp({ db, auth, publicConfig, deviceToken, simulator, temperatureCalibration = {}, integrations = {} }) {
   const app = express();
   const demo = Boolean(simulator);
   const deviceHash = deviceToken ? digest(deviceToken) : null;
@@ -38,6 +40,19 @@ export function createApp({ db, auth, publicConfig, deviceToken, simulator, temp
     }
     next();
   });
+  app.get('/api/photon/webhook', (req, res) => res.json({
+    enabled: Boolean(integrations.photon), deliveryMethod: 'POST',
+  }));
+  app.post('/api/photon/webhook',
+    (req, res, next) => {
+      if (!integrations.photon) return res.status(503).json({ error: 'Photon webhook is disabled.' });
+      next();
+    },
+    express.raw({ type: 'application/json', limit: '128kb', inflate: false }),
+    async (req, res) => {
+      await receivePhoton(db, integrations, req.body, req.headers);
+      res.sendStatus(204);
+    });
   app.use('/api', express.json({ limit: '32kb' }));
 
   const owner = async (req, res, next) => {
@@ -63,6 +78,7 @@ export function createApp({ db, auth, publicConfig, deviceToken, simulator, temp
     const result = await state(db, req.owner, demo);
     for (const building of result.buildings) {
       if (building.reading) building.reading.sensors = addTemperature(building.reading.sensors, temperatureCalibration[building.id], building.source);
+      if (building.id === 'data_center') building.ir_alerts_enabled = demo || integrations.monitorIr !== false;
     }
     res.json(result);
   });
@@ -80,17 +96,27 @@ export function createApp({ db, auth, publicConfig, deviceToken, simulator, temp
     res.json(incident);
   });
   app.post('/api/service-requests/:id/decision', owner, async (req, res) => {
-    const result = await recordDecision(db, req.owner, id.parse(req.params.id), decision.parse(req.body));
+    const result = await recordDecision(db, req.owner, id.parse(req.params.id), decision.parse(req.body), integrations);
     res.json({ id: result.id, status: result.status, version: result.version });
   });
   app.post('/api/work-orders/:id/progress', owner, async (req, res) => {
     const input = workUpdate.parse(req.body);
-    res.json(await advanceWork(db, req.owner, id.parse(req.params.id), input.action, input, demo));
+    res.json(await advanceWork(db, req.owner, id.parse(req.params.id), input.action, input, demo, integrations));
+  });
+  app.post('/api/service-requests/:id/answer', owner, async (req, res) => {
+    const requestId = id.parse(req.params.id);
+    const input = z.object({ reply: notes }).parse(req.body);
+    await db.transaction((tx) => answerInvestigation(tx, req.owner, requestId, input.reply));
+    res.json({ ok: true });
   });
   app.post('/api/hardware/telemetry', device, async (req, res) => {
     const input = snapshot.parse(req.body);
     requireCondition(input.source === (demo ? 'simulated' : 'hardware'), 422, 'Unexpected telemetry source for this environment');
-    res.json(await ingest(db, input));
+    res.json(await ingest(db, input, new Date(), integrations));
+  });
+  if (!demo) app.post('/api/buildings/office/light/relearn', owner, async (req, res) => {
+    await relearnOfficeLight(db, req.owner);
+    res.json({ ok: true });
   });
   app.get('/api/hardware/commands', device, async (req, res) => res.json(await pendingCommands(db, deviceId)));
   app.post('/api/hardware/commands', owner, async (req, res) => {

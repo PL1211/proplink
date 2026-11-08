@@ -1,20 +1,59 @@
-export const staleMs = 5000;
-const sustainMs = 3000;
+import { enqueue } from './jobs.js';
+import { calibrationMs, learnOfficeBaseline, lightThreshold, officeLightTiming, staleMs, sustainMs } from '../shared/office-light.js';
+
+export { staleMs };
 
 export function requireCondition(condition, status, message) {
   if (!condition) throw Object.assign(new Error(message), { status });
 }
 
-async function one(db, sql, params = []) {
+export async function one(db, sql, params = []) {
   return (await db.query(sql, params)).rows[0];
 }
 
-async function activity(tx, building, incident, kind, message) {
+export async function activity(tx, building, incident, kind, message) {
   await tx.query('insert into bc.activity (building_id, incident_id, kind, message, created_at) values ($1,$2,$3,$4,clock_timestamp())',
     [building, incident, kind, message]);
 }
 
-async function detect(tx, building, kind, snapshot, evidence) {
+async function calibrateOffice(tx, snapshot, office, captured) {
+  if (snapshot.source !== 'hardware' || snapshot.sequence < 7) return null;
+  const { rows } = await tx.query(`
+    select captured_at, payload->'buildings'->'office' as reading
+    from bc.telemetry where device_id=$1 and boot_id=$2 and payload->>'source'='hardware'
+      and captured_at between $3 and $4 and received_at-captured_at < interval '5 seconds'
+    order by captured_at desc limit 40`,
+  [snapshot.device_id, snapshot.boot_id,
+    new Date(Math.max(captured.valueOf() - calibrationMs - 5000, Number(new Date(office.light_calibration_after)))), captured]);
+  // A recent unstable sample should restart the learning window.
+  const samples = rows.reverse();
+  const lastBeforeWindow = samples.findLastIndex(({ captured_at }) => captured - new Date(captured_at) >= calibrationMs);
+  if (lastBeforeWindow < 0) return null;
+  const baseline = learnOfficeBaseline(samples.slice(lastBeforeWindow).map(({ captured_at, reading }) => ({
+    captured: new Date(captured_at).valueOf(), lightsOn: reading.commanded.leds.some(Boolean),
+    ratio: reading.sensors.light.raw / reading.sensors.light.adc_max,
+  })));
+  if (baseline === null) return null;
+  const threshold = lightThreshold(baseline);
+  await tx.query("update bc.buildings set light_baseline_ratio=$1,light_min_ratio=$2 where id='office'", [baseline, threshold]);
+  await activity(tx, 'office', null, 'calibration', 'Office light baseline learned from the live sensor');
+  return threshold;
+}
+
+export async function relearnOfficeLight(db, owner) {
+  return db.transaction(async (tx) => {
+    const device = await one(tx, `select d.id from bc.devices d join bc.buildings b on b.device_id=d.id
+      join bc.memberships m on m.building_id=b.id where b.id='office' and m.user_id=$1 for update of d`, [owner]);
+    requireCondition(device, 404, 'Office not found');
+    const incident = await one(tx, "select id from bc.incidents where building_id='office' and kind='low_light' and status<>'resolved'");
+    requireCondition(!incident, 409, 'Finish the active office lighting incident before relearning the baseline.');
+    await tx.query("update bc.buildings set light_baseline_ratio=null,light_min_ratio=null,light_calibration_after=now() where id='office'");
+    await tx.query('update bc.devices set dark_since=null,light_recovered_since=null where id=$1', [device.id]);
+    await activity(tx, 'office', null, 'calibration', 'Owner requested a new office light baseline');
+  });
+}
+
+async function detect(tx, building, kind, snapshot, evidence, integrations) {
   const previous = await one(tx, "select id from bc.incidents where building_id=$1 and kind=$2 and status <> 'resolved'", [building, kind]);
   if (previous) {
     await tx.query('update bc.incidents set last_seen_at=$2 where id=$1', [previous.id, snapshot.captured_at]);
@@ -27,11 +66,18 @@ async function detect(tx, building, kind, snapshot, evidence) {
   const recommendation = kind === 'low_light'
     ? 'Inspect the office lighting circuit and confirm why illumination is below its calibrated range.'
     : 'Inspect the area and sensor to determine what triggered the IR signal.';
-  await tx.query('insert into bc.service_requests (incident_id, version, recommendation) values ($1,1,$2)', [id, recommendation]);
+  const request = await one(tx, 'insert into bc.service_requests (incident_id, version, recommendation) values ($1,1,$2) returning id',
+    [id, recommendation]);
   await activity(tx, building, id, 'proposal', 'Inspection proposed for owner approval');
+  if (snapshot.source === 'hardware' && integrations.investigate) {
+    await tx.query('insert into bc.investigations (request_id) values ($1)', [request.id]);
+    await enqueue(tx, id, 'investigate', `investigate:${request.id}`, { requestId: request.id });
+  } else if (snapshot.source === 'hardware' && integrations.contacts?.[building]) {
+    await enqueue(tx, id, 'owner_approval', `approval:${request.id}`, { requestId: request.id });
+  }
 }
 
-export async function ingest(db, snapshot, now = new Date()) {
+export async function ingest(db, snapshot, now = new Date(), integrations = {}) {
   const captured = new Date(snapshot.captured_at);
   requireCondition(captured - now <= 2000, 422, 'Device timestamp is ahead of the server clock');
   requireCondition(now - captured <= 86400000, 422, 'Reading is outside the 24-hour ingest window');
@@ -49,14 +95,19 @@ export async function ingest(db, snapshot, now = new Date()) {
       return { duplicate: false, current: false };
     }
 
-    const office = await one(tx, "select light_min_ratio, lights_expected_on from bc.buildings where id='office'");
+    const office = await one(tx, "select light_min_ratio,light_calibration_after,lights_expected_on from bc.buildings where id='office'");
     const light = snapshot.buildings.office.sensors.light;
     const lightsOn = snapshot.buildings.office.commanded.leds.some(Boolean);
-    const calibrated = office.light_min_ratio !== null && office.lights_expected_on && lightsOn;
-    const dark = calibrated && light.raw / light.adc_max < Number(office.light_min_ratio);
-    const continuous = lastCaptured && captured - lastCaptured <= staleMs && device.latest.boot_id === snapshot.boot_id;
-    const darkSince = dark ? (continuous && device.dark_since || captured) : null;
-    const recoveredSince = calibrated && !dark ? (continuous && device.light_recovered_since || captured) : null;
+    let threshold = null;
+    if (office.lights_expected_on && lightsOn) {
+      threshold = office.light_min_ratio === null ? await calibrateOffice(tx, snapshot, office, captured) : Number(office.light_min_ratio);
+    }
+    const continuous = lastCaptured && captured - lastCaptured < staleMs && device.latest.boot_id === snapshot.boot_id;
+    const timing = officeLightTiming({
+      ratio: light.raw / light.adc_max, threshold, captured: captured.valueOf(), continuous, previous: device,
+    });
+    const darkSince = timing.dark_since == null ? null : new Date(timing.dark_since);
+    const recoveredSince = timing.light_recovered_since == null ? null : new Date(timing.light_recovered_since);
     await tx.query(`
       update bc.devices set latest=$2, captured_at=$3, received_at=$4, dark_since=$5, light_recovered_since=$6 where id=$1`,
     [snapshot.device_id, snapshot, captured, now, darkSince, recoveredSince]);
@@ -65,12 +116,12 @@ export async function ingest(db, snapshot, now = new Date()) {
         await activity(tx, building, null, 'connection', lastCaptured ? 'Controller connection restored' : 'First controller snapshot received');
       }
     }
-    if (darkSince && captured - new Date(darkSince) >= sustainMs) {
-      await detect(tx, 'office', 'low_light', snapshot, { ...light, min_ratio: Number(office.light_min_ratio), captured_at: snapshot.captured_at });
+    if (timing.alert) {
+      await detect(tx, 'office', 'low_light', snapshot, { ...light, min_ratio: threshold, captured_at: snapshot.captured_at }, integrations);
     }
     const ir = snapshot.buildings.data_center.sensors.flame_ir;
-    if (ir.ir_alert || ir.alert_seen_since_last_report) {
-      await detect(tx, 'data_center', 'ir_alert', snapshot, { ...ir, captured_at: snapshot.captured_at });
+    if ((snapshot.source === 'simulated' || integrations.monitorIr !== false) && (ir.ir_alert || ir.alert_seen_since_last_report)) {
+      await detect(tx, 'data_center', 'ir_alert', snapshot, { ...ir, captured_at: snapshot.captured_at }, integrations);
     }
     if (snapshot.sequence % 60 === 0) {
       await tx.query("delete from bc.telemetry where device_id=$1 and captured_at < $2::timestamptz - interval '1 day'", [snapshot.device_id, now]);
@@ -79,10 +130,10 @@ export async function ingest(db, snapshot, now = new Date()) {
   });
 }
 
-export async function recordDecision(db, owner, requestId, input) {
+export async function recordDecision(db, owner, requestId, input, integrations = {}) {
   return db.transaction(async (tx) => {
     const request = await one(tx, `
-      select r.*, i.building_id, i.status as incident_status
+      select r.*, i.building_id, i.source, i.status as incident_status
       from bc.service_requests r join bc.incidents i on i.id=r.incident_id
       join bc.memberships m on m.building_id=i.building_id and m.user_id=$2
       where r.id=$1 for update of r`, [requestId, owner]);
@@ -99,6 +150,9 @@ export async function recordDecision(db, owner, requestId, input) {
       const work = await one(tx, 'insert into bc.work_orders (request_id) values ($1) returning id', [requestId]);
       await tx.query('insert into bc.outbound_actions (work_order_id) values ($1)', [work.id]);
       await activity(tx, request.building_id, request.incident_id, 'queued', 'Technician contact queued');
+      if (request.source === 'hardware' && integrations.contacts?.[request.building_id]) {
+        await enqueue(tx, request.incident_id, 'technician_message', `technician:${work.id}`, { workId: work.id });
+      }
     }
     return recorded;
   });
@@ -107,15 +161,16 @@ export async function recordDecision(db, owner, requestId, input) {
 const steps = {
   contact: { before: 'queued', after: 'contacted', message: 'Technician contact recorded' },
   accept: { before: 'contacted', after: 'accepted', message: 'Technician acceptance recorded' },
+  decline: { before: 'contacted', after: 'declined', message: 'Technician declined the work order' },
   report: { before: 'accepted', after: 'repair_reported', message: 'Repair findings recorded' },
   verify: { before: 'repair_reported', after: 'verified', message: 'Repair verified and incident resolved' },
 };
 
-export async function advanceWork(db, owner, workId, action, { notes, method } = {}, demo = false) {
+export async function advanceWork(db, owner, workId, action, { notes, method } = {}, demo = false, integrations = {}) {
   const step = steps[action];
   return db.transaction(async (tx) => {
     const work = await one(tx, `
-      select w.*, i.id as incident_id, i.building_id, i.kind, b.device_id
+      select w.*, i.id as incident_id, i.building_id, i.kind, i.source, b.device_id
       from bc.work_orders w join bc.service_requests r on r.id=w.request_id
       join bc.incidents i on i.id=r.incident_id join bc.buildings b on b.id=i.building_id
       join bc.memberships m on m.building_id=i.building_id and m.user_id=$2
@@ -144,6 +199,10 @@ export async function advanceWork(db, owner, workId, action, { notes, method } =
     const updated = await one(tx, 'update bc.work_orders set status=$2, findings=coalesce($3,findings) where id=$1 returning *',
       [workId, step.after, action === 'report' ? notes : null]);
     await activity(tx, work.building_id, work.incident_id, action, demo ? step.message + ' (demo)' : step.message);
+    if (['accept', 'decline', 'report', 'verify'].includes(action) &&
+        work.source === 'hardware' && integrations.contacts?.[work.building_id]) {
+      await enqueue(tx, work.incident_id, 'owner_update', `update:${workId}:${action}`, { workId, action });
+    }
     return updated;
   });
 }
@@ -151,18 +210,24 @@ export async function advanceWork(db, owner, workId, action, { notes, method } =
 export async function state(db, owner, demo) {
   return db.transaction(async (tx) => {
     const buildings = (await tx.query(`
-      select b.id,b.name,b.light_min_ratio,b.lights_expected_on,d.id as device_id,d.latest,d.captured_at
+      select b.id,b.name,b.light_baseline_ratio,b.light_min_ratio,b.lights_expected_on,d.id as device_id,d.latest,d.captured_at
       from bc.buildings b join bc.devices d on d.id=b.device_id
       join bc.memberships m on m.building_id=b.id where m.user_id=$1 order by b.id desc`, [owner])).rows;
     requireCondition(buildings.length, 403, 'Your account has no assigned buildings.');
     const incidentRows = (await tx.query(`
       select i.*, r.id as request_id, r.version, r.recommendation,
         case when r.status='pending' and r.expires_at<=now() then 'expired' else r.status end as approval,
-        w.id as work_id,w.status as work_status,w.findings,c.verification,c.notes as verification_notes
+        w.id as work_id,w.status as work_status,w.findings,c.verification,c.notes as verification_notes,
+        n.status as investigation_status,n.assessment,
+        case when n.status='waiting' and r.status='pending' and r.expires_at>now()
+          then n.assessment->>'question' end as owner_question
       from bc.incidents i join bc.memberships m on m.building_id=i.building_id
       left join lateral (select * from bc.service_requests where incident_id=i.id order by version desc limit 1) r on true
       left join bc.work_orders w on w.request_id=r.id
       left join bc.repair_cases c on c.incident_id=i.id
+      left join lateral (select inv.status, inv.assessment from bc.investigations inv
+        join bc.service_requests base on base.id=inv.request_id where base.incident_id=i.id
+        order by base.version desc limit 1) n on true
       where m.user_id=$1 order by (i.status='resolved'),i.opened_at desc limit 100`, [owner])).rows;
     const events = (await tx.query(`
       select a.* from bc.activity a join bc.memberships m on m.building_id=a.building_id

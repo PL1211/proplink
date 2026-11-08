@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createClient } from '@supabase/supabase-js';
+import { lightThreshold, officeLightTiming } from '../shared/office-light.js';
 import {
   Activity, AlertTriangle, ArrowRight, Building2, Check, CheckCircle2, ChevronRight, CircleDot, ClipboardCheck,
   ArrowLeft, Box, Clock3, FlaskConical, LayoutGrid, LogOut, MousePointerClick, Radio, RefreshCw, Server, Settings, Settings2, Wrench, X,
@@ -14,16 +15,17 @@ const date = (value) => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 
 const time = (value) => value ? new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '—';
 const nameOf = (id) => id === 'office' ? 'Office' : 'Data Center';
 const adc = (sensor) => sensor ? `${sensor.raw.toLocaleString()} ADC counts` : 'Awaiting reading';
+const percent = (ratio) => Math.round(Number(ratio) * 100) + '%';
 const degree = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1, minimumFractionDigits: 1 });
 const temperatureText = (sensor) => sensor?.temperature_c == null ? adc(sensor) :
   `${sensor.temperature_status === 'room_estimate' ? '≈ ' : ''}${degree.format(sensor.temperature_c)} °C / ${degree.format(sensor.temperature_c * 9 / 5 + 32)} °F`;
 const temperatureNote = (sensor) => ({ room_estimate: 'Estimated from room reference', estimated: 'Estimated',
   out_of_range: 'Outside estimate range' })[sensor.temperature_status] ?? 'Calibration needed';
-const flame = (sensor) => !sensor ? 'Awaiting reading' : sensor.ir_alert ? 'Alert detected' :
+const flame = (sensor) => !sensor ? 'Awaiting reading' : sensor.ir_alert ? 'Signal active' :
   sensor.alert_seen_since_last_report ? 'Brief activation' : 'Clear';
 const fan = (reading) => !reading ? 'Awaiting status' : reading.commanded.fan === 'running' ? 'Running' : 'Stopped';
 const issueOf = (incident) => incident.kind === 'low_light' ? 'Unexpected low lighting' : 'IR sensor activation';
-const statusText = { queued: 'Contact queued', contacted: 'Contact recorded', accepted: 'Visit accepted', repair_reported: 'Awaiting verification', verified: 'Repair verified' };
+const statusText = { queued: 'Contact queued', contacted: 'Contact recorded', accepted: 'Visit accepted', declined: 'Technician declined', repair_reported: 'Awaiting verification', verified: 'Repair verified' };
 
 async function api(path, token, body, signal) {
   const response = await fetch('/api' + path, {
@@ -89,7 +91,10 @@ function BuildingReadings({ building }) {
   const sensors = reading?.sensors;
   const temperature = sensors?.thermistor;
   return <dl className="building-readings">
-    <div><dt>{office ? 'Ambient light' : 'Flame sensor'}</dt><dd>{office ? adc(sensors?.light) : flame(sensors?.flame_ir)}</dd></div>
+    <div><dt>{office ? 'Ambient light' : 'Flame sensor'}</dt><dd>{office ? adc(sensors?.light) : flame(sensors?.flame_ir)}
+      {office && <small>{building.light_min_ratio == null ? 'Waiting for a stable light baseline' :
+        `${building.light_baseline_ratio == null ? '' : 'Baseline ' + percent(building.light_baseline_ratio) + ' · '}Alert below ${percent(building.light_min_ratio)}`}</small>}
+      {!office && building.ir_alerts_enabled === false && <small>Reference reading · Alerts disabled</small>}</dd></div>
     <div><dt>Temperature sensor</dt><dd>{temperatureText(temperature)}{temperature && <small>{temperatureNote(temperature)} · {temperature.hot ? 'Heat flag active' : 'Heat flag inactive'}</small>}</dd></div>
     <div><dt>Fan</dt><dd>{fan(reading)}{reading && <small>Controller reported · Speed unavailable</small>}</dd></div>
   </dl>;
@@ -110,10 +115,11 @@ function BuildingCard({ building, incident, onView }) {
   </article>;
 }
 
-function IncidentCard({ incident, demo, decide, work, busy }) {
+function IncidentCard({ incident, demo, decide, work, answer, busy }) {
   const evidence = incident.evidence;
   const light = incident.kind === 'low_light';
   const [note, setNote] = useState('');
+  const [reply, setReply] = useState('');
   const isPending = incident.approval === 'pending';
   const action = { queued: 'contact', contacted: 'accept', accepted: 'report' }[incident.work_status];
   const actionLabel = { contact: demo ? 'Simulate technician contact' : 'Record technician contact', accept: demo ? 'Simulate acceptance' : 'Record acceptance', report: 'Record repair findings' };
@@ -129,6 +135,17 @@ function IncidentCard({ incident, demo, decide, work, busy }) {
       'The IR input registered an activation. An inspection can help determine what triggered the signal.'}</p>
     <div className="recommendation"><ClipboardCheck size={17} /><div><strong>Recommended next step</strong><p>{incident.recommendation}</p></div></div>
     <div className="incident-actions">
+      {incident.assessment && <div>
+        <strong>Nemotron assessment</strong>
+        <p>{incident.assessment.observation} {incident.assessment.uncertainty}</p>
+        {incident.assessment.outcome !== 'inspect' && <p>{incident.assessment.recommendation}</p>}
+      </div>}
+      {['queued', 'running'].includes(incident.investigation_status) && isPending && <small>Nemotron is reviewing the evidence.</small>}
+      {incident.owner_question && <div className="service">
+        <label>{incident.owner_question}<textarea value={reply} maxLength={1000} onChange={(event) => setReply(event.target.value)} /></label>
+        <button className="button secondary" disabled={busy || !reply.trim()}
+          onClick={async () => { if (await answer(incident, reply)) setReply(''); }}>Send answer</button>
+      </div>}
       {isPending && <div className="row"><button className="button primary" disabled={busy} onClick={() => decide(incident, 'approved')}>Review request <ArrowRight size={15} /></button>
         <button className="button secondary" disabled={busy} onClick={() => decide(incident, 'declined')}>Decline</button></div>}
       {incident.work_status && <div className="service">
@@ -260,6 +277,61 @@ function DemoControls({ close, run, busy, error }) {
   </Modal>;
 }
 
+const lightScenarios = {
+  covered: { label: 'Cover sensor', samples: ['normal', 'low', 'low', 'low', 'low'] },
+  shadow: { label: 'Brief shadow', samples: ['normal', 'low', 'low', 'normal', 'normal'] },
+  recovery: { label: 'Uncover sensor', samples: ['low', 'low', 'low', 'low', 'normal', 'normal', 'normal', 'normal'] },
+};
+
+function OfficeLightTest({ office, demo, close, relearn, busy, error }) {
+  const [scenario, setScenario] = useState('covered');
+  const [confirmRelearn, setConfirmRelearn] = useState(false);
+  const baseline = Number(office?.light_baseline_ratio ?? 0.68);
+  const threshold = Number(office?.light_min_ratio ?? lightThreshold(baseline));
+  const normal = Math.max(baseline, threshold);
+  let timing = {};
+  let alerted = false;
+  let recovered = false;
+  const samples = lightScenarios[scenario].samples.map((level, seconds) => {
+    const ratio = level === 'low' ? threshold * 0.48 : normal;
+    timing = officeLightTiming({ ratio, threshold, captured: seconds * 1000, continuous: seconds > 0, previous: timing });
+    const event = timing.alert && !alerted ? 'Alert opens' : timing.recovered && alerted && !recovered ? 'Light recovered' : '';
+    alerted ||= timing.alert;
+    recovered ||= alerted && timing.recovered;
+    return { ratio, seconds, event };
+  });
+  const result = recovered ? 'Light recovered. In a live incident, the owner can verify the repair after the technician reports it.' :
+    alerted ? 'Low light lasted 3 seconds. In a live incident, BuildingConnect asks the owner to approve a visit before messaging the technician.' :
+      'The shadow cleared before 3 seconds, so no incident opens.';
+
+  return <Modal title="Test office light" close={close}>
+    <p>Run a simulation with the Arduino off. These samples stay in this window and send no iMessages.</p>
+    <div className="row wrap">{Object.entries(lightScenarios).map(([id, option]) =>
+      <button key={id} type="button" className={'button ' + (id === scenario ? 'primary' : 'secondary')}
+        aria-pressed={id === scenario} onClick={() => setScenario(id)}>{option.label}</button>)}</div>
+    <p><strong>{office?.light_min_ratio == null ? 'Example threshold' : 'Office threshold'}</strong> · {percent(threshold)}</p>
+    <div className="light-test-samples" aria-label="Simulated light samples">
+      {samples.map(({ ratio, seconds, event }) => <div className="light-test-sample" key={seconds}>
+        <span>{seconds}s</span><progress value={ratio} max={1} aria-label={`Light at ${seconds} seconds`} />
+        <strong>{percent(ratio)}</strong>{event && <small>{event}</small>}
+      </div>)}
+    </div>
+    <p role="status">{result}</p>
+    {!demo && office && <div className="service">
+      <strong>Live office calibration</strong>
+      <p>Leave the sensor uncovered with the LEDs on. BuildingConnect learns the baseline from 15 seconds of stable readings.</p>
+      {error && <p className="error" role="alert">{error}</p>}
+      {office.light_min_ratio != null && <div className="row wrap">
+        <button type="button" className="button secondary" disabled={busy} onClick={async () => {
+          if (!confirmRelearn) setConfirmRelearn(true);
+          else if (await relearn()) setConfirmRelearn(false);
+        }}>{confirmRelearn ? 'Confirm relearn' : 'Relearn baseline'}</button>
+        {confirmRelearn && <button type="button" className="text-button" onClick={() => setConfirmRelearn(false)}>Cancel</button>}
+      </div>}
+    </div>}
+  </Modal>;
+}
+
 function useEngine(options) {
   const canvasRef = useRef(null);
   const labelsRef = useRef(null);
@@ -346,7 +418,7 @@ function SensorHistory({ buildingId, token, office }) {
     <ReadingsChart samples={history.samples} office={office} /></>;
 }
 
-function World({ data, demo, busy, token, status, notices, settings, decide, work }) {
+function World({ data, demo, busy, token, status, notices, settings, decide, work, answer, lightTest }) {
   const [site, setSite] = useState(null);
   const [sel, setSel] = useState(null);
   const { canvasRef, labelsRef, engine, status: gl } = useEngine({ onSelect: setSel, onEnter: (id) => { setSite(id); setSel(null); } });
@@ -390,7 +462,7 @@ function World({ data, demo, busy, token, status, notices, settings, decide, wor
   }
   return <div className="world">
     <canvas ref={canvasRef} className="world-canvas" aria-label="Interactive 3D view of the office and data center" /><div ref={labelsRef} className="hotspots" />
-    <header className="world-top"><Brand dark /><div className="row">{status}{settings}</div></header>
+    <header className="world-top"><Brand dark /><div className="row">{status}{lightTest}{settings}</div></header>
     <div className="world-notices">{notices}</div>
     {gl === 'failed' && <div className="card world-fallback" role="alert">3D view is not available in this browser. Open Settings and choose Normal.</div>}
     <aside className="world-panel" aria-label={building ? building.name : 'Buildings'}>
@@ -411,7 +483,7 @@ function World({ data, demo, busy, token, status, notices, settings, decide, wor
           <p><MousePointerClick size={14} /> Click an item to inspect its status. Drag to look around.</p></div>
         {focus}
         <div className="card world-readings"><h3>Latest readings</h3><BuildingReadings building={building} /></div>
-        {incidents.filter((incident) => incident.building_id === building.id).map((incident) => <IncidentCard key={incident.id} incident={incident} demo={demo} busy={busy} decide={decide} work={work} />)}
+        {incidents.filter((incident) => incident.building_id === building.id).map((incident) => <IncidentCard key={incident.id} incident={incident} demo={demo} busy={busy} decide={decide} work={work} answer={answer} />)}
         <div className="card recent"><h3>Recent activity</h3><EventList compact events={data.activity.filter((event) => event.building_id === building.id).slice(0, 4)} /></div>
       </>}
     </aside>
@@ -428,6 +500,7 @@ function Dashboard({ session, client, demo }) {
   const [selected, setSelected] = useState('office');
   const [confirm, setConfirm] = useState(null);
   const [controls, setControls] = useState(false);
+  const [testingLight, setTestingLight] = useState(false);
   const [view, setView] = useState(() => { try { return localStorage.getItem('bc-view') === 'normal' ? 'normal' : '3d'; } catch { return '3d'; } });
   const changeView = (next) => { setView(next); try { localStorage.setItem('bc-view', next); } catch { /* storage unavailable */ } };
   const version = useRef(0);
@@ -465,6 +538,12 @@ function Dashboard({ session, client, demo }) {
   const fresh = data?.buildings.filter((building) => building.connection === 'fresh').length ?? 0;
   const activeWork = open.filter((incident) => incident.work_id).length;
   const connected = fresh > 0 && !loadError;
+  const answer = (incident, reply) => run('/service-requests/' + incident.request_id + '/answer', { reply });
+  const office = data?.buildings.find(({ id }) => id === 'office');
+  const lightTest = office && <button className="button secondary light-test-button" onClick={() => {
+    setActionError('');
+    setTestingLight(true);
+  }}><FlaskConical size={15} />Test office light</button>;
   function viewBuilding(building) { setSelected(building); setTab('Sensor Data'); }
   const descriptions = {
     Overview: 'Monitor building conditions and manage maintenance requests.',
@@ -482,18 +561,20 @@ function Dashboard({ session, client, demo }) {
         }}>{busy ? 'Saving…' : confirm.decision === 'approved' ? 'Approve visit' : 'Decline visit'}</button></div>
     </Modal>}
     {controls && <DemoControls close={() => setControls(false)} run={run} busy={busy} error={actionError} />}
+    {testingLight && <OfficeLightTest office={office} demo={demo} close={() => { setTestingLight(false); setActionError(''); }}
+      relearn={() => run('/buildings/office/light/relearn', {})} busy={busy} error={actionError} />}
   </>;
   const statusBadge = data && <Badge tone={connected ? 'green' : 'neutral'}>{loadError ? 'API unavailable' : connected ? 'Controller reporting' : 'Controller offline'}</Badge>;
   const notices = <>
     {loadError && <div className="notice error" role="alert">{loadError}{data ? ' Showing the last loaded view.' : ''}</div>}
-    {actionError && !confirm && !controls && <div className="notice error" role="alert">{actionError}</div>}
+    {actionError && !confirm && !controls && !testingLight && <div className="notice error" role="alert">{actionError}</div>}
   </>;
   const settingsMenu = <SettingsMenu view={view} setView={changeView} client={client} demo={demo} email={session?.user?.email}
     openControls={() => { setActionError(''); setControls(true); }} />;
   if (view === '3d') return <div className="world-shell">
-    <World data={data} demo={demo} busy={busy} token={token} status={statusBadge} notices={notices} settings={settingsMenu}
+    <World data={data} demo={demo} busy={busy} token={token} status={statusBadge} notices={notices} settings={settingsMenu} lightTest={lightTest}
       decide={(item, decision) => { setActionError(''); setConfirm({ item, decision }); }}
-      work={(item, body) => run('/work-orders/' + item.work_id + '/progress', body)} />
+      work={(item, body) => run('/work-orders/' + item.work_id + '/progress', body)} answer={answer} />
     {modals}
   </div>;
   return <div className="shell">
@@ -507,13 +588,13 @@ function Dashboard({ session, client, demo }) {
     <div className="workspace">
       <header className="topbar"><div className="breadcrumb">Workspace <ChevronRight size={14} /> <strong>{tab}</strong></div>
         <div className="row">{demo && <span className="mode"><FlaskConical size={14} /> Demo mode</span>}
-          <button className="icon-button refresh" aria-label="Refresh dashboard" onClick={() => refresh()}><RefreshCw size={17} /></button>{settingsMenu}</div></header>
+          {lightTest}<button className="icon-button refresh" aria-label="Refresh dashboard" onClick={() => refresh()}><RefreshCw size={17} /></button>{settingsMenu}</div></header>
       <main>
         <div className="page-heading row spread wrap"><div><div className="eyebrow blue-text">BUILDING OPERATIONS</div>
           <h1>{tab === 'Overview' ? 'Operations overview' : tab}</h1><p>{descriptions[tab]}</p></div>
           {data && <Badge tone={connected ? 'green' : 'neutral'}>{loadError ? 'API unavailable' : connected ? 'Controller reporting' : 'Controller offline'}</Badge>}</div>
         {loadError && <div className="notice error" role="alert">{loadError}{data ? ' Showing the last loaded view.' : ''}</div>}
-        {actionError && !confirm && !controls && <div className="notice error" role="alert">{actionError}</div>}
+        {actionError && !confirm && !controls && !testingLight && <div className="notice error" role="alert">{actionError}</div>}
         {!data && !loadError && <div className="card empty" role="status">Loading workspace…</div>}
         {data && tab === 'Overview' && <>
           <div className="metrics">
@@ -532,7 +613,7 @@ function Dashboard({ session, client, demo }) {
               {!data.incidents.length && <div className="card empty"><CheckCircle2 size={22} />No maintenance incidents yet.</div>}
               <div className="stack">{data.incidents.map((incident) => <IncidentCard key={incident.id} incident={incident} demo={demo} busy={busy}
                 decide={(item, decision) => { setActionError(''); setConfirm({ item, decision }); }}
-                work={(item, body) => run('/work-orders/' + item.work_id + '/progress', body)} />)}</div>
+                work={(item, body) => run('/work-orders/' + item.work_id + '/progress', body)} answer={answer} />)}</div>
             </section>
             <section><div className="section-heading"><h2>Recent activity</h2><p>Latest workflow events.</p></div>
               <div className="card recent"><EventList compact events={data.activity.slice(0, 5)} />
