@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createClient } from '@supabase/supabase-js';
-import { lightThreshold, lightUpperThreshold, officeLightTiming } from '../shared/office-light.js';
+import { defaultLightDropPercent, defaultLightRisePercent, lightThreshold, lightUpperThreshold, officeLightTiming } from '../shared/office-light.js';
 import {
   Activity, AlertTriangle, ArrowRight, Building2, Check, CheckCircle2, ChevronRight, CircleDot, ClipboardCheck,
   ArrowLeft, Box, Clock3, FlaskConical, LayoutGrid, LogOut, MousePointerClick, Radio, RefreshCw, Server, Settings, Settings2, Wrench, X,
@@ -93,7 +93,7 @@ function officeLightDetail(building, light) {
   const baseline = Number(building.light_baseline_ratio);
   if (!baseline) return `Alert below ${percent(building.light_min_ratio)} of sensor range`;
   const lower = percent(building.light_min_ratio / baseline);
-  const upper = lightUpperThreshold(baseline, light?.adc_max ?? 1023);
+  const upper = lightUpperThreshold(baseline, light?.adc_max ?? 1023, building.light_rise_percent);
   const level = light ? `${percent(light.raw / light.adc_max / baseline)} of baseline · ` : '';
   return `${level}Alert below ${lower}${upper == null ? ' · Upper limit outside sensor range' : ` or above ${percent(upper / baseline)}`}`;
 }
@@ -296,15 +296,26 @@ const lightScenarios = {
   recovery: { label: 'Uncover sensor', samples: ['low', 'low', 'low', 'low', 'normal', 'normal', 'normal', 'normal'] },
 };
 
-function OfficeLightTest({ office, demo, close, relearn, busy, error }) {
+function OfficeLightTest({ office, demo, close, relearn, saveThresholds, busy, error }) {
   const [scenario, setScenario] = useState('covered');
   const [confirmRelearn, setConfirmRelearn] = useState(false);
+  const [draft, setDraft] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const savedDrop = office?.light_drop_percent ?? defaultLightDropPercent;
+  const savedRise = office?.light_rise_percent ?? defaultLightRisePercent;
+  const { dropPercent, risePercent } = draft ?? { dropPercent: savedDrop, risePercent: savedRise };
+  const changed = dropPercent !== savedDrop || risePercent !== savedRise;
   const adcMax = office?.reading?.sensors?.light?.adc_max ?? 1023;
   const liveBaseline = office?.light_baseline_ratio;
-  const useExample = liveBaseline == null || (scenario === 'bright' && lightUpperThreshold(liveBaseline, adcMax) == null);
-  const baseline = useExample ? 0.68 : Number(liveBaseline);
-  const threshold = useExample ? lightThreshold(baseline) : Number(office.light_min_ratio);
-  const upperThreshold = lightUpperThreshold(baseline, adcMax);
+  const upperUnavailable = liveBaseline != null && lightUpperThreshold(liveBaseline, adcMax, risePercent) == null;
+  const useExample = liveBaseline == null || (scenario === 'bright' && upperUnavailable);
+  const baseline = useExample ? 0.45 : Number(liveBaseline);
+  const threshold = lightThreshold(baseline, dropPercent);
+  const upperThreshold = lightUpperThreshold(baseline, adcMax, risePercent);
+  function changeThreshold(name, value) {
+    setSaved(false);
+    setDraft({ dropPercent, risePercent, [name]: Number(value) });
+  }
   let timing = {};
   let previousRatio;
   let alerted = false;
@@ -324,12 +335,31 @@ function OfficeLightTest({ office, demo, close, relearn, busy, error }) {
       'The shadow cleared before 3 seconds, so no incident opens.';
 
   return <Modal title="Test office light" close={close}>
+    <form className="service light-threshold-settings" onSubmit={async (event) => {
+      event.preventDefault();
+      if (await saveThresholds({ dropPercent, risePercent })) { setDraft(null); setSaved(true); }
+    }}>
+      <strong>Office light alert thresholds</strong>
+      <label>Alert below baseline by {dropPercent}%
+        <input type="range" min="1" max="99" value={dropPercent} disabled={busy}
+          aria-label="Percent below baseline" onChange={(event) => changeThreshold('dropPercent', event.target.value)} />
+      </label>
+      <label>Alert above baseline by {risePercent}%
+        <input type="range" min="1" max="100" value={risePercent} disabled={busy}
+          aria-label="Percent above baseline" onChange={(event) => changeThreshold('risePercent', event.target.value)} />
+      </label>
+      {upperUnavailable && <small>The upper threshold exceeds the sensor’s range at this baseline. Lower the slider to detect bright light.</small>}
+      <div className="row wrap">
+        <button className="button primary" type="submit" disabled={busy || !changed}>Save thresholds</button>
+        {saved && <small role="status">Thresholds saved</small>}
+      </div>
+      {error && <p className="error" role="alert">{error}</p>}
+    </form>
     <p>Run a simulation with the Arduino off. These samples stay in this window and send no iMessages.</p>
     <div className="row wrap">{Object.entries(lightScenarios).map(([id, option]) =>
       <button key={id} type="button" className={'button ' + (id === scenario ? 'primary' : 'secondary')}
         aria-pressed={id === scenario} onClick={() => setScenario(id)}>{option.label}</button>)}</div>
-    <p><strong>{useExample ? 'Example thresholds' : 'Office thresholds'}</strong> · Below {percent(threshold / baseline)}{upperThreshold != null && ` or above ${percent(upperThreshold / baseline)}`} of baseline</p>
-    {liveBaseline != null && lightUpperThreshold(liveBaseline, adcMax) == null && <p>The live upper threshold is outside the sensor’s measurable range.</p>}
+    <p><strong>{useExample ? 'Example thresholds' : changed ? 'Preview thresholds' : 'Office thresholds'}</strong> · Below {percent(threshold / baseline)}{upperThreshold != null && ` or above ${percent(upperThreshold / baseline)}`} of baseline</p>
     <div className="light-test-samples" aria-label="Simulated light samples">
       {samples.map(({ ratio, seconds, event }) => <div className="light-test-sample" key={seconds}>
         <span>{seconds}s</span><progress value={ratio} max={1} aria-label={`Light at ${seconds} seconds`} />
@@ -340,7 +370,6 @@ function OfficeLightTest({ office, demo, close, relearn, busy, error }) {
     {!demo && office && <div className="service">
       <strong>Live office calibration</strong>
       <p>Leave the sensor uncovered with the LEDs on. proplink learns the baseline from 15 seconds of stable readings.</p>
-      {error && <p className="error" role="alert">{error}</p>}
       {office.light_min_ratio != null && <div className="row wrap">
         <button type="button" className="button secondary" disabled={busy} onClick={async () => {
           if (!confirmRelearn) setConfirmRelearn(true);
@@ -587,7 +616,8 @@ function Dashboard({ session, client, demo, intro }) {
     </Modal>}
     {controls && <DemoControls close={() => setControls(false)} run={run} busy={busy} error={actionError} />}
     {testingLight && <OfficeLightTest office={office} demo={demo} close={() => { setTestingLight(false); setActionError(''); }}
-      relearn={() => run('/buildings/office/light/relearn', {})} busy={busy} error={actionError} />}
+      relearn={() => run('/buildings/office/light/relearn', {})}
+      saveThresholds={(values) => run('/buildings/office/light/thresholds', values)} busy={busy} error={actionError} />}
   </>;
   const statusBadge = data && <Badge tone={connected ? 'green' : 'neutral'}>{loadError ? 'API unavailable' : connected ? 'Controller reporting' : 'Controller offline'}</Badge>;
   const notices = <>

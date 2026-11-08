@@ -8,7 +8,7 @@ import { demoOwner, demoSnapshot } from '../server/demo.js';
 import { integrationConfig } from '../server/integration-config.js';
 import { createIntegrationWorker } from '../server/integration-worker.js';
 import { runNemotron } from '../server/nemotron.js';
-import { advanceWork, ingest, state } from '../server/workflow.js';
+import { advanceWork, ingest, setOfficeLightThresholds, state } from '../server/workflow.js';
 
 const ownerPhone = '+14155550101';
 const technicianPhone = '+14155550102';
@@ -38,6 +38,9 @@ test('shared Photon iMessage replies survive worker restart and use the existing
   await db.query('insert into bc.memberships select $1,id from bc.buildings', [demoOwner]);
   const baseline = 891 / 1023;
   await db.query("update bc.buildings set light_baseline_ratio=$1,light_min_ratio=$2 where id='office'", [baseline, baseline * 0.65]);
+  await setOfficeLightThresholds(db, demoOwner, { dropPercent: 25, risePercent: 5 });
+  const office = (await state(db, demoOwner, false)).buildings.find(({ id }) => id === 'office');
+  assert.equal(Number(office.light_min_ratio), baseline * 0.75);
 
   const server = createApp({ db, integrations: config }).listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -75,7 +78,7 @@ test('shared Photon iMessage replies survive worker restart and use the existing
         const steps = ['get_incident', 'get_sensor_history', 'search_verified_repairs', 'submit_assessment'];
         const name = steps[turn++];
         if (name === 'get_sensor_history') assert.equal(JSON.parse(messages.at(-1).content).kind, 'high_light');
-        if (name === 'search_verified_repairs') assert.equal(JSON.parse(messages.at(-1).content).at(-1).sensors.light.raw, 990);
+        if (name === 'search_verified_repairs') assert.equal(JSON.parse(messages.at(-1).content).at(-1).sensors.light.raw, 950);
         const outcome = options.ownerReply ? 'inspect' : 'clarify';
         const args = name === 'submit_assessment' ? {
           outcome, observation: 'Light was above the bench threshold.', uncertainty: 'An extra light source is possible.',
@@ -97,12 +100,12 @@ test('shared Photon iMessage replies survive worker restart and use the existing
     await ingest(db, snapshot, time, config);
   }
   await push(0, 0, 280);
-  await push(1, 3200, 990);
+  await push(1, 3200, 950);
   assert.equal((await state(db, demoOwner, false)).incidents.length, 0);
   await push(2, 6400, 1023);
-  await push(3, 9600, 990);
+  await push(3, 9600, 950);
   assert.equal((await state(db, demoOwner, false)).incidents.length, 0);
-  await push(4, 12800, 990);
+  await push(4, 12800, 950);
   await worker.tick();
   let [incident] = (await state(db, demoOwner, false)).incidents;
   const originalRequest = incident.request_id;

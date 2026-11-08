@@ -114,6 +114,13 @@ test('HTTP validates credentials, separates measured from historical data, and b
   assert.deepEqual(await (await request('/photon/webhook', 'wrong')).json(), { enabled: false, deliveryMethod: 'POST' });
   assert.equal((await request('/photon/webhook', 'wrong', {})).status, 503);
   assert.equal((await request('/state', 'wrong')).status, 401);
+  const thresholds = '/buildings/office/light/thresholds';
+  assert.equal((await request(thresholds, 'wrong', { dropPercent: 25, risePercent: 7 })).status, 401);
+  assert.equal((await request(thresholds, 'owner', { dropPercent: 0, risePercent: 7 })).status, 422);
+  assert.equal((await request(thresholds, 'owner', { dropPercent: 25, risePercent: 7 })).status, 200);
+  const officeSettings = (await (await request('/state', 'owner')).json()).buildings.find(({ id }) => id === 'office');
+  assert.equal(officeSettings.light_drop_percent, 25);
+  assert.equal(officeSettings.light_rise_percent, 7);
   assert.equal((await request('/work-orders/00000000-0000-4000-8000-000000000099/progress', 'owner', { action: 'contact' })).status, 404);
   assert.equal((await request('/hardware/telemetry', 'wrong', {})).status, 401);
   assert.equal((await request('/hardware/telemetry', token, {})).status, 422);

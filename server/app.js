@@ -8,11 +8,12 @@ import { receivePhoton } from './photon.js';
 import { addTemperature } from './temperature.js';
 import {
   acknowledgeCommand, advanceWork, ingest, pendingCommands, queueCommand, readings,
-  recordDecision, relearnOfficeLight, requireCondition, state,
+  recordDecision, relearnOfficeLight, requireCondition, setOfficeLightThresholds, state,
 } from './workflow.js';
 
 const scenario = z.enum(['office-dark', 'office-normal', 'ir-alert', 'ir-clear', 'pause', 'resume']);
 const notes = z.string().trim().min(1).max(1000);
+const lightThresholds = z.strictObject({ dropPercent: z.int().min(1).max(99), risePercent: z.int().min(1).max(100) });
 const workUpdate = z.union([
   z.object({ action: z.literal('contact') }),
   z.object({ action: z.literal('accept') }),
@@ -116,6 +117,10 @@ export function createApp({ db, auth, publicConfig, deviceToken, simulator, temp
   });
   if (!demo) app.post('/api/buildings/office/light/relearn', owner, async (req, res) => {
     await relearnOfficeLight(db, req.owner);
+    res.json({ ok: true });
+  });
+  app.post('/api/buildings/office/light/thresholds', owner, async (req, res) => {
+    await setOfficeLightThresholds(db, req.owner, lightThresholds.parse(req.body));
     res.json({ ok: true });
   });
   app.get('/api/hardware/commands', device, async (req, res) => res.json(await pendingCommands(db, deviceId)));

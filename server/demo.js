@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { deviceId } from './contracts.js';
 import { acknowledgeCommand, ingest, pendingCommands } from './workflow.js';
+import { lightThreshold } from '../shared/office-light.js';
 
 export const demoOwner = '00000000-0000-4000-8000-000000000001';
 
@@ -26,7 +27,10 @@ export function demoSnapshot({ boot, sequence, captured, dark, ir, outputs }) {
 
 export async function createDemo(db) {
   await db.query('insert into bc.memberships select $1,id from bc.buildings on conflict do nothing', [demoOwner]);
-  await db.query("update bc.buildings set light_min_ratio=0.48 where id='office'");
+  const { rows: [office] } = await db.query("select light_drop_percent from bc.buildings where id='office'");
+  const baseline = 744 / 1023;
+  await db.query("update bc.buildings set light_baseline_ratio=$1,light_min_ratio=$2 where id='office' and light_baseline_ratio is null",
+    [baseline, lightThreshold(baseline, office.light_drop_percent)]);
   const { latest } = (await db.query('select latest from bc.devices where id=$1', [deviceId])).rows[0];
   const outputs = Object.fromEntries(['office', 'data_center'].map((building) => [
     building, latest?.buildings[building].commanded ?? { leds: [true, true, true], fan: 'running' },

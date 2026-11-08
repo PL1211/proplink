@@ -2,11 +2,13 @@ export const staleMs = 15_000;
 export const officeSampleGapMs = 8000;
 export const sustainMs = 3000;
 export const calibrationMs = 15_000;
-export const lightThreshold = (baseline) => baseline * 0.65;
+export const defaultLightDropPercent = 35;
+export const defaultLightRisePercent = 10;
+export const lightThreshold = (baseline, dropPercent = defaultLightDropPercent) => baseline * (1 - dropPercent / 100);
 
-export function lightUpperThreshold(baseline, adcMax) {
+export function lightUpperThreshold(baseline, adcMax, risePercent = defaultLightRisePercent) {
   if (baseline == null) return null;
-  const limit = baseline * 1.10;
+  const limit = baseline * (1 + risePercent / 100);
   return limit < (adcMax - 1) / adcMax ? limit : null;
 }
 

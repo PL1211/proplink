@@ -36,21 +36,39 @@ async function calibrateOffice(tx, snapshot, office, captured) {
     ratio: reading.sensors.light.raw / reading.sensors.light.adc_max,
   })));
   if (baseline === null) return null;
-  const threshold = lightThreshold(baseline);
+  const threshold = lightThreshold(baseline, office.light_drop_percent);
   await tx.query("update bc.buildings set light_baseline_ratio=$1,light_min_ratio=$2 where id='office'", [baseline, threshold]);
   await activity(tx, 'office', null, 'calibration', 'Office light baseline learned from the live sensor');
   return threshold;
 }
 
+async function lockOfficeDevice(tx, owner) {
+  const device = await one(tx, `select d.id from bc.devices d join bc.buildings b on b.device_id=d.id
+      join bc.memberships m on m.building_id=b.id where b.id='office' and m.user_id=$1 for update of d`, [owner]);
+  requireCondition(device, 404, 'Office not found');
+  return device.id;
+}
+
+export async function setOfficeLightThresholds(db, owner, { dropPercent, risePercent }) {
+  return db.transaction(async (tx) => {
+    const device = await lockOfficeDevice(tx, owner);
+    const office = await one(tx, "select light_baseline_ratio,light_drop_percent,light_rise_percent from bc.buildings where id='office'");
+    if (office.light_drop_percent === dropPercent && office.light_rise_percent === risePercent) return;
+    const lower = office.light_baseline_ratio == null ? null : lightThreshold(office.light_baseline_ratio, dropPercent);
+    await tx.query(`update bc.buildings set light_drop_percent=$1,light_rise_percent=$2,
+      light_min_ratio=coalesce($3,light_min_ratio) where id='office'`, [dropPercent, risePercent, lower]);
+    await tx.query('update bc.devices set dark_since=null,light_recovered_since=null where id=$1', [device]);
+    await activity(tx, 'office', null, 'calibration', `Owner set light alerts to ${dropPercent}% below or ${risePercent}% above baseline`);
+  });
+}
+
 export async function relearnOfficeLight(db, owner) {
   return db.transaction(async (tx) => {
-    const device = await one(tx, `select d.id from bc.devices d join bc.buildings b on b.device_id=d.id
-      join bc.memberships m on m.building_id=b.id where b.id='office' and m.user_id=$1 for update of d`, [owner]);
-    requireCondition(device, 404, 'Office not found');
+    const device = await lockOfficeDevice(tx, owner);
     const incident = await one(tx, "select id from bc.incidents where building_id='office' and kind='low_light' and status<>'resolved'");
     requireCondition(!incident, 409, 'Finish the active office lighting incident before relearning the baseline.');
     await tx.query("update bc.buildings set light_baseline_ratio=null,light_min_ratio=null,light_calibration_after=now() where id='office'");
-    await tx.query('update bc.devices set dark_since=null,light_recovered_since=null where id=$1', [device.id]);
+    await tx.query('update bc.devices set dark_since=null,light_recovered_since=null where id=$1', [device]);
     await activity(tx, 'office', null, 'calibration', 'Owner requested a new office light baseline');
   });
 }
@@ -99,14 +117,15 @@ export async function ingest(db, snapshot, now = new Date(), integrations = {}) 
       return { duplicate: false, current: false };
     }
 
-    const office = await one(tx, "select light_baseline_ratio,light_min_ratio,light_calibration_after,lights_expected_on from bc.buildings where id='office'");
+    const office = await one(tx, `select light_baseline_ratio,light_min_ratio,light_calibration_after,
+      light_drop_percent,light_rise_percent,lights_expected_on from bc.buildings where id='office'`);
     const light = snapshot.buildings.office.sensors.light;
     const lightsOn = snapshot.buildings.office.commanded.leds.some(Boolean);
     let threshold = null;
     if (office.lights_expected_on && lightsOn && light.raw < light.adc_max) {
       threshold = office.light_min_ratio === null ? await calibrateOffice(tx, snapshot, office, captured) : Number(office.light_min_ratio);
     }
-    const upperThreshold = lightUpperThreshold(office.light_baseline_ratio, light.adc_max);
+    const upperThreshold = lightUpperThreshold(office.light_baseline_ratio, light.adc_max, office.light_rise_percent);
     const previousLight = device.latest?.buildings.office.sensors.light;
     const continuous = lastCaptured && captured - lastCaptured < officeSampleGapMs && device.latest.boot_id === snapshot.boot_id;
     const timing = officeLightTiming({
@@ -221,7 +240,8 @@ export async function advanceWork(db, owner, workId, action, { notes, method } =
 export async function state(db, owner, demo) {
   return db.transaction(async (tx) => {
     const buildings = (await tx.query(`
-      select b.id,b.name,b.light_baseline_ratio,b.light_min_ratio,b.lights_expected_on,d.id as device_id,d.latest,d.captured_at
+      select b.id,b.name,b.light_baseline_ratio,b.light_min_ratio,b.light_drop_percent,b.light_rise_percent,
+        b.lights_expected_on,d.id as device_id,d.latest,d.captured_at
       from bc.buildings b join bc.devices d on d.id=b.device_id
       join bc.memberships m on m.building_id=b.id where m.user_id=$1 order by b.id desc`, [owner])).rows;
     requireCondition(buildings.length, 403, 'Your account has no assigned buildings.');

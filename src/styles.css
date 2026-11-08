@@ -269,6 +269,7 @@ dialog::backdrop { background: #101d2c78; }
 .light-test-sample progress { width: 100%; accent-color: #3b71dc; }
 .light-test-sample small { color: #805315; }
 .light-test-button { white-space: nowrap; }
+.light-threshold-settings input[type="range"] { width: 100%; accent-color: #3b71dc; }
 @media (max-width: 540px) {
   .world-top .row > .badge { display: none; }
   .light-test-sample { grid-template-columns: 1.6rem minmax(3rem, 1fr) 2.2rem minmax(0, 5rem); gap: 0.35rem; }
